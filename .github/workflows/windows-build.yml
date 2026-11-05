@@ -42,6 +42,19 @@ jobs:
           echo "full=$version" >> "$GITHUB_OUTPUT"
           echo "tag=v${version%+*}" >> "$GITHUB_OUTPUT"
 
+      # Every update must carry a new version, so the version in the app
+      # always tells which build it is. A version already released fails here.
+      - name: Refuse an already-released version
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.version.outputs.tag }}"
+          if gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "::error::$tag is already released. Bump version: in pubspec.yaml and CoreConstants.appVersion."
+            exit 1
+          fi
+
       - name: Build GUI (release)
         run: flutter build windows --release
 
@@ -71,5 +84,4 @@ jobs:
           files: |
             installer_output\TradingPionex-Setup-${{ steps.version.outputs.full }}.exe
             TradingPionex-Windows-${{ steps.version.outputs.full }}.zip
-          # Same version pushed again replaces that release's files.
           make_latest: true

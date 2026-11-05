@@ -8,7 +8,9 @@ Latest version: **https://fabughali.github.io/tradingPionex/**, or the
 Every push to `main` runs the tests and builds the Windows installer and a
 portable zip on GitHub Actions (`.github/workflows/windows-build.yml`). Each
 build is published as a release tagged from the `version:` in `pubspec.yaml`,
-so bump that version for every new release.
+so every update must bump that version and `CoreConstants.appVersion` together
+(a test checks they match, and the build refuses a version already released).
+The version shows in the app under Settings → About.
 
 A deterministic crypto futures-grid trading engine, rebuilt in Flutter/Dart
 from the original Node.js `bot-grid.js` engine (see `../PRD.md` for the full
@@ -37,8 +39,9 @@ off always stops the engine too, with no exception.
 
 All three read/write the same data directory: `$TRADING_PIONEX_HOME`, or
 `~/.tradingpionex` by default (config.json, .env, logs/, brain/, and the
-PAUSE/STOP/CHECKNOW control files). Put your Pionex API credentials in
-`~/.tradingpionex/.env` — see `.env.example`.
+PAUSE/STOP/CHECKNOW control files). Enter your Pionex API key and secret in
+the app's **Settings** screen. They are saved only in that data directory,
+never in this code or repo.
 
 **Known environment note:** if this project directory lives on a FAT32/exFAT
 mount (as it currently does on this machine — `/media/.../PARTITION11`),

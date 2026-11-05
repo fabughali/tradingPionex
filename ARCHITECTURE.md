@@ -112,7 +112,7 @@ proved out; I kept it.
 
 ```
 config.json              — mirrors the old config.json shape (see AppConfig)
-.env                      — PIONEX_API_KEY / PIONEX_API_SECRET
+.env                      — Pionex API key/secret, written only by the Settings screen
 PAUSE / STOP / CHECKNOW   — control files (same semantics as the original)
 logs/
   engine.log              — structured log, 20MB rotation, 60-day purge

@@ -51,3 +51,4 @@ config.json
 /windows_installer/vc_redist.x64.exe
 *.zip
 
+.omc/

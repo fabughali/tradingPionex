@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/core_constants.dart';
 import '../../core/core_layout.dart';
 import '../../core/core_spacing.dart';
 import '../../core/core_theme.dart';
@@ -494,6 +495,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               child: const Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  Text(
+                    'Version ${CoreConstants.appVersion}',
+                    style: TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                  SizedBox(height: 4),
                   Text(
                     'TradingPionex — a deterministic crypto futures-grid trading engine.',
                   ),

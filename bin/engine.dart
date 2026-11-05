@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:trading_pionex/core/core_constants.dart';
 import 'package:trading_pionex/core/core_storage.dart';
 import 'package:trading_pionex/core/engine_process.dart';
 import 'package:trading_pionex/data/config/config_loader.dart';
@@ -72,6 +73,7 @@ void main() async {
   // it from status.json freshness) before deciding whether Power-on needs to
   // launch a new one.
   storage.writeString(storage.pidFile, pid.toString());
+  logger.log('engine ${CoreConstants.appVersion} starting (PID $pid)');
   // A request left over from before this run must never stop this run.
   storage.deleteFileIfExists(storage.engineShutdownRequestFile);
 
