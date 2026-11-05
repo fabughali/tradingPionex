@@ -1,0 +1,40 @@
+/// App-wide constants. Anything the user might reasonably want to change
+/// lives in config.json instead (see data/models/app_config.dart) — this file
+/// is for values that are structural, not user preference.
+class CoreConstants {
+  CoreConstants._();
+
+  static const String appName = 'TradingPionex';
+
+  // Mirrors bot-grid.js's MAINLOOP WATCHDOG: a stuck cycle is force-aborted
+  // past this ceiling so the engine never wedges itself permanently.
+  static const Duration mainLoopWatchdog = Duration(seconds: 600);
+
+  // Per the user (2026-09-05): while Power is on, the app must keep
+  // checking TradingView is up and both custom indicators are attached on
+  // its own, continuously - not just once, and not just on failure. This
+  // drives that recurring check (and dismisses any upgrade dialog).
+  static const Duration indicatorVerifyInterval = Duration(seconds: 5);
+
+  static const Duration heartbeatTick = Duration(minutes: 1);
+
+  // How long a freshly-created grid bot is actively polled for a confirmed
+  // RUNNING status before the app stops polling and leaves it to the
+  // normal reconciliation loop - never cancelled/forgotten locally just
+  // for taking longer than this (2026-09-15, per the user: no local
+  // action without real feedback from Pionex).
+  static const Duration gridPrepareTimeout = Duration(seconds: 60);
+  static const Duration gridPreparePoll = Duration(seconds: 5);
+
+  static const int maxShrinkRetries = 12;
+  static const double stableLiquidationFraction = 0.60;
+
+  static const Duration pionexRequestTimeout = Duration(seconds: 15);
+  static const Duration cdpRequestTimeout = Duration(seconds: 60);
+  static const Duration cdpJsonListTimeout = Duration(seconds: 10);
+  static const Duration cdpConnectTimeout = Duration(seconds: 10);
+
+  static const String cmcFearGreedUrl =
+      'https://pro-api.coinmarketcap.com/public-api/v3/fear-and-greed/latest';
+  static const Duration cmcRequestTimeout = Duration(seconds: 8);
+}

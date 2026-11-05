@@ -1,0 +1,25 @@
+{
+  "mode": "confirm",
+  "poll_interval_sec": 5,
+  "autoReserve": true,
+  "cdp": { "host": "127.0.0.1", "port": 9222 },
+  "grid_pairs": [
+    { "symbol": "BINANCE:BTCUSDT", "investment": 100 }
+  ],
+  "technique": {
+    "min_grids": 3,
+    "max_grids": null,
+    "grid_spacing": "arithmetic",
+    "range_swing_count": 20,
+    "validate_with_checkparams": false
+  },
+  "risk": {
+    "daily_loss_limit_pct": 5,
+    "max_positions": 3,
+    "max_per_symbol": 1,
+    "max_trades_per_day": 10,
+    "max_trade_size_pct": 2,
+    "cooldown_sec": 900
+  },
+  "heartbeat": { "alert_every_min": 15 }
+}
