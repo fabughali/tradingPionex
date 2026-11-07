@@ -1998,6 +1998,10 @@ class EngineService {
     return _lastAutoCandleTs[category] != boundaryMs;
   }
 
+  /// The last "nothing to do" line each category logged, so it is written
+  /// once per change instead of every tick.
+  final Map<AutoCategory, String> _lastIdleNote = {};
+
   Future<void> _runAutoCheckup(
     AutoCategory category, {
     bool force = false,
@@ -2027,13 +2031,17 @@ class EngineService {
         DateTime.now().toUtc(),
         category,
       ).millisecondsSinceEpoch;
-      logger.log(
-        paused
-            ? 'autoCheckup$tag: Auto off - nothing read, nothing done.'
-            : 'autoCheckup$tag: no auto-managed bases to check right now.',
-      );
+      // Logged once per change, not every 5s tick.
+      final note = paused
+          ? 'autoCheckup$tag: Auto off - nothing read, nothing done.'
+          : 'autoCheckup$tag: no auto-managed bases to check right now.';
+      if (_lastIdleNote[category] != note) {
+        _lastIdleNote[category] = note;
+        logger.log(note);
+      }
       return;
     }
+    _lastIdleNote.remove(category);
     final resuming = _autoResumePairs[category] != null;
     // Bug fixed 2026-09-27, real-money-adjacent (per the user: "why when i
     // terminate a bot ... everything stuck" - traced to the GUI, not the
