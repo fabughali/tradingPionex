@@ -33,7 +33,7 @@ class OpenEntry {
   /// rule needs. Null for any entry not opened by this technique (an
   /// adopted bot, or one opened before this field existed) - treated as
   /// "never matches," same as any other unset identity check.
-  final Worm10EventType? openEventType;
+  final Worm10EventKind? openEventType;
 
   /// The bar time of [openEventType] when the retroactive audit has corrected
   /// the record; [entryTime] stays the trade's real start. Null means the event
@@ -42,11 +42,11 @@ class OpenEntry {
 
   /// Whether [event] is the exact event recorded as having opened this trade.
   bool openedBy(Worm10Event event) =>
-      openEventType == event.type && (openEventTime ?? entryTime) == event.time;
+      openEventType == event.kind && (openEventTime ?? entryTime) == event.time;
 
   OpenEntry copyWith({
     String? buOrderId,
-    Worm10EventType? openEventType,
+    Worm10EventKind? openEventType,
     int? openEventTime,
   }) => OpenEntry(
     direction: direction,

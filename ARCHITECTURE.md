@@ -30,7 +30,7 @@ Exactly like the original engine and its opencode helper scripts never
 shared a process (they only communicated through files — `PAUSE`, `STOP`,
 `CHECKNOW`, `logs/state.json`, `logs/created-bots.json`, `logs/pending-create.json`)
 this app has two independent entry points, both built from the same `lib/`
-code, coordinating only through `$TRADING_PIONEX_HOME` (`~/.tradingpionex` by
+code, coordinating only through `$TRADING_PIONEX_HOME` (`%USERPROFILE%\.tradingpionex` by
 default — see `lib/core/core_storage.dart`):
 
 ```
@@ -108,7 +108,7 @@ proved out; I kept it.
    This app has exactly one architecture doc (this file) and one gaps
    tracker (GAPS.md) — update them in place, don't add a third.
 
-## Data directory layout (`$TRADING_PIONEX_HOME`, default `~/.tradingpionex`)
+## Data directory layout (`$TRADING_PIONEX_HOME`, default `%USERPROFILE%\.tradingpionex`)
 
 ```
 config.json              — mirrors the old config.json shape (see AppConfig)
@@ -132,7 +132,7 @@ brain/
 
 - **No Supabase/Firebase, by choice.** Cross-platform here means the Flutter
   UI *code* runs anywhere Flutter targets; the actual trading engine only
-  ever runs on the Linux machine with TradingView Desktop + CDP, since that
+  ever runs on the Windows PC with TradingView Desktop + CDP, since that
   access can't be remoted without a relay we deliberately didn't build.
 - **English only**, l10n architecture (l10n.yaml, ARB, generated
   `AppLocalizations`) is wired for real and used for the static UI chrome

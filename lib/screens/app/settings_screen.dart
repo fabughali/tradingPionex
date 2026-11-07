@@ -11,18 +11,9 @@ import '../../widgets/masked_secret_field.dart';
 import '../../widgets/reuse_button.dart';
 import '../../widgets/reuse_card.dart';
 
-/// Fires the exact same voice+notification pair a real trade trigger would
-/// (2026-09-17, per the user - the test buttons should demonstrate the
-/// whole feature, not just the voice half). Mirrors `_speak` in
-/// `ReuseNavShell` deliberately, including the timestamp on the
-/// notification.
+/// Speaks the same phrase a real trade alert would.
 void _testAlert(WidgetRef ref, String text) {
-  final sound = ref.read(soundServiceProvider);
-  sound.speak(text);
-  final now = DateTime.now();
-  String two(int n) => n.toString().padLeft(2, '0');
-  final stamp = '${two(now.hour)}:${two(now.minute)}:${two(now.second)}';
-  sound.notify('$text — $stamp');
+  ref.read(soundServiceProvider).speak(text);
 }
 
 class SettingsScreen extends ConsumerStatefulWidget {
@@ -163,35 +154,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               ),
             ),
             ReuseCard(
-              title: 'Remote session',
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'This is NOT auto-detected - the machine\'s own session '
-                    'info has proven unreliable for this. Tell the app '
-                    'which kind of session you\'re on right now.',
-                    style: textTheme.bodySmall,
-                  ),
-                  const SizedBox(height: CoreSpacing.sm),
-                  SwitchListTile(
-                    contentPadding: EdgeInsets.zero,
-                    title: const Text('Remote session'),
-                    subtitle: Text(
-                      config.remoteSession
-                          ? 'TradingView stays hidden on an isolated display - safe for remote access.'
-                          : 'TradingView shows normally - only safe on a genuinely local/direct session.',
-                    ),
-                    value: config.remoteSession,
-                    onChanged: (v) {
-                      integrations.saveRemoteSession(v);
-                      ref.invalidate(configProvider);
-                    },
-                  ),
-                ],
-              ),
-            ),
-            ReuseCard(
               title: 'Voice alerts',
               child: Builder(
                 builder: (context) {
@@ -204,12 +166,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                         contentPadding: EdgeInsets.zero,
                         title: const Text('Start alerts'),
                         subtitle: const Text(
-                          'Speaks "start long/short PAIR" and shows a system notification whenever a real trade opens.',
+                          'Speaks "start long/short PAIR" whenever a real trade opens.',
                         ),
                         value: muted['start'] != true,
                         onChanged: (v) => notifier.setMuted('start', !v),
                         secondary: IconButton(
-                          tooltip: 'Test - plays/shows regardless of the mute toggle above',
+                          tooltip: 'Test - plays regardless of the mute toggle above',
                           icon: const Icon(Icons.volume_up_outlined),
                           onPressed: () => _testAlert(ref, 'start long XRP'),
                         ),
@@ -218,12 +180,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                         contentPadding: EdgeInsets.zero,
                         title: const Text('Stop alerts'),
                         subtitle: const Text(
-                          'Speaks "close PAIR" and shows a system notification whenever a trade closes.',
+                          'Speaks "close PAIR" whenever a trade closes.',
                         ),
                         value: muted['stop'] != true,
                         onChanged: (v) => notifier.setMuted('stop', !v),
                         secondary: IconButton(
-                          tooltip: 'Test - plays/shows regardless of the mute toggle above',
+                          tooltip: 'Test - plays regardless of the mute toggle above',
                           icon: const Icon(Icons.volume_up_outlined),
                           onPressed: () => _testAlert(ref, 'close XRP'),
                         ),
@@ -300,57 +262,26 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                     ],
                   ),
                   const SizedBox(height: CoreSpacing.sm),
+                  // Status only: TradingView is shared with tradingMT5, so
+                  // this app never starts or stops it.
                   Row(
                     children: [
-                      if (_activeAction == 'tv-power')
-                        const SizedBox(
-                          width: 20,
-                          height: 20,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      else
-                        Switch(
-                          value: _tvUp ?? false,
-                          onChanged: _busy || _tvUp == null
-                              ? null
-                              : (v) => _run('tv-power', () async {
-                                  final port =
-                                      int.tryParse(_tvPort.text.trim()) ??
-                                      9222;
-                                  final host = _tvHost.text.trim();
-                                  final result = v
-                                      ? await integrations.testTradingView(
-                                          host: host,
-                                          port: port,
-                                        )
-                                      : await integrations.powerOffTradingView(
-                                          host: host,
-                                          port: port,
-                                        );
-                                  final nowUp = await integrations
-                                      .isTradingViewUp(host: host, port: port);
-                                  if (!mounted) return;
-                                  setState(() {
-                                    _tvUp = nowUp;
-                                    _tvTestOk = result.ok;
-                                    _tvTestMessage = result.message;
-                                  });
-                                  ref
-                                      .read(controlRepositoryProvider)
-                                      .logUiOutcome(
-                                        'TradingView ${v ? 'power on' : 'power off'}: ${result.message}',
-                                        success: result.ok,
-                                      );
-                                  _notify(result.message, success: result.ok);
-                                }),
-                        ),
+                      Icon(
+                        Icons.circle,
+                        size: 12,
+                        color: _tvUp == null
+                            ? Theme.of(context).disabledColor
+                            : (_tvUp!
+                                  ? Colors.green
+                                  : Theme.of(context).colorScheme.error),
+                      ),
                       const SizedBox(width: CoreSpacing.sm),
                       Text(
                         _tvUp == null
                             ? 'Checking…'
                             : (_tvUp!
                                   ? 'TradingView Desktop is running'
-                                  : 'TradingView Desktop is stopped'),
+                                  : 'TradingView Desktop is not running — open it with --remote-debugging-port'),
                         style: Theme.of(context).textTheme.bodyMedium,
                       ),
                     ],

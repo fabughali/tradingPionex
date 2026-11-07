@@ -107,7 +107,7 @@ final tradeStartEventsProvider =
     });
 
 final soundServiceProvider = Provider<SoundService>(
-  (ref) => SoundService(ref.watch(storageProvider)),
+  (ref) => const SoundService(),
 );
 
 /// Per-tone mute state for the sound-alert feature (2026-09-17, per the

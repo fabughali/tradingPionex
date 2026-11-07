@@ -1,11 +1,13 @@
 import 'dart:io';
 
+import 'package:trading_pionex/data/models/signal.dart';
 import 'package:trading_pionex/data/technique/worm10_decision.dart';
 import 'package:trading_pionex/data/tradingview/cdp_client.dart';
 import 'package:trading_pionex/data/tradingview/chart_state.dart';
 import 'package:trading_pionex/data/tradingview/signals_reader.dart';
 
-// Read-only check of the Worm10 reader against the chart as it stands: never
+// Read-only check of the Hybrid Decision reader (tradingMT5's
+// readWorm10Signals) against this app's own chart tab as it stands: never
 // switches symbol or changes anything, and never touches Pionex.
 // Usage: dart run tool/worm10_check.dart [port]   (default 9222)
 Future<void> main(List<String> args) async {
@@ -16,46 +18,42 @@ Future<void> main(List<String> args) async {
   print('chart: $symbol ${state.resolution}');
   if (symbol == null) exit(1);
 
-  final check = await readWorm10Bars(
+  final check = await readWorm10Signals(
     cdp,
     symbol,
     customScripts[0].scriptIdPart,
     customScripts[1].scriptIdPart,
     onDebugError: (msg) => print('reader error: $msg'),
   );
-  print('bars: ${check.bars.length}  latest bar: ${_at(check.latestBarTime)}');
-
-  final zones = <String?, int>{};
-  for (final b in check.bars) {
-    zones[b.rsiZone] = (zones[b.rsiZone] ?? 0) + 1;
+  print('zigzag signals: ${check.zigzag.signals.length}  '
+      'supertrend signals: ${check.supertrend.signals.length}  '
+      'RSI bars: ${check.rsiZones.length}  latest bar: ${_at(check.latestBarTime)}');
+  final zones = <RsiZone, int>{};
+  for (final z in check.rsiZones) {
+    zones[z.zone] = (zones[z.zone] ?? 0) + 1;
   }
-  print('RSI zones: $zones');
-  for (final b in check.bars.skip(check.bars.length > 5 ? check.bars.length - 5 : 0)) {
-    print(
-      '  ${_at(b.time)} zone=${b.rsiZone} hh=${b.hh} ll=${b.ll} '
-      'BUY=${b.zigzagBuy} SELL=${b.zigzagSell} stBuy=${b.stBuy} stSell=${b.stSell}',
-    );
-  }
+  print('RSI zones: ${zones.map((k, v) => MapEntry(k.name, v))}');
 
-  final events = deriveWorm10Events(check.bars);
+  final events = deriveWorm10Events(check);
   print('events: ${events.length}, newest last:');
   for (final e in events.skip(events.length > 8 ? events.length - 8 : 0)) {
-    print('  ${e.type.name} @ ${_at(e.time)}');
+    print('  ${worm10EventKindToWire(e.kind)} @ ${_at(e.time)}');
   }
 
-  final wrong = await readWorm10Bars(
+  final wrong = await readWorm10Signals(
     cdp,
     'NOTTHISSYMBOLUSDT',
     customScripts[0].scriptIdPart,
     customScripts[1].scriptIdPart,
     onDebugError: (msg) => print('guard refused as expected: $msg'),
   );
-  print('wrong-symbol read returned ${wrong.bars.length} bars (must be 0)');
+  print('wrong-symbol read returned ${wrong.zigzag.signals.length} signals (must be 0)');
+  cdp.close();
   exit(0);
 }
 
-String _at(int? sec) => sec == null
+String _at(int? t) => t == null
     ? 'none'
-    : DateTime.fromMillisecondsSinceEpoch(sec * 1000, isUtc: true)
+    : DateTime.fromMillisecondsSinceEpoch(t * 1000, isUtc: true)
           .toIso8601String()
           .substring(0, 16);

@@ -1,4 +1,6 @@
 import '../technique/worm10_decision.dart';
+import '../technique/worm10_pionex.dart';
+import 'trade_direction.dart';
 import 'grid_bot.dart';
 
 /// One currently-running auto bot's fresh signal read, captured during the
@@ -32,7 +34,7 @@ class RunningBotCheck {
   /// (per the user: "remove any old technique from code and from prd") -
   /// neither of those had any real consumer beyond this file's own JSON
   /// round-trip.
-  final Worm10EventType? latestEventType;
+  final Worm10EventKind? latestEventType;
 
   String get pairKey => '${base.toUpperCase()}/USDT';
 
@@ -44,9 +46,9 @@ class RunningBotCheck {
   bool get opposesBotDirection =>
       latestEventType != null &&
       ((botDirection == GridDirection.long &&
-              worm10EventDirection(latestEventType!) == Worm10Direction.sell) ||
+              worm10EventDirection(latestEventType!) == TradeDirection.short) ||
           (botDirection == GridDirection.short &&
-              worm10EventDirection(latestEventType!) == Worm10Direction.buy));
+              worm10EventDirection(latestEventType!) == TradeDirection.long));
 
   factory RunningBotCheck.fromJson(Map<String, dynamic> json) =>
       RunningBotCheck(
@@ -59,7 +61,7 @@ class RunningBotCheck {
         latestEventType: () {
           final name = json['latestEventType'] as String?;
           if (name == null) return null;
-          for (final t in Worm10EventType.values) {
+          for (final t in Worm10EventKind.values) {
             if (t.name == name) return t;
           }
           return null;

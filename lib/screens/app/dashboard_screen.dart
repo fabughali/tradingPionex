@@ -14,6 +14,7 @@ import '../../data/providers/app_providers.dart';
 import '../../l10n/app_localizations.dart';
 import '../../utilities/util_date.dart';
 import '../../utilities/util_string.dart';
+import '../../widgets/power_off_confirm.dart';
 import '../../widgets/auto_category_switches.dart';
 import '../../widgets/category_knob.dart';
 import '../../widgets/countdown_text.dart';
@@ -321,7 +322,11 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
       return false;
     }
 
-    await repo.launchEngineIfNeeded();
+    if (!await repo.launchEngineIfNeeded()) {
+      _notify('Power-up stopped — the engine could not start.', success: false);
+      return false;
+    }
+    repo.markPowerOn();
     // Power ON never runs a checkup (full or auto) - it only verifies the
     // engine is actually connected and current: balance + auto/manual bot
     // lists refreshed (repo.status()), TradingView reachable with
@@ -358,10 +363,16 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
       if (turnOn) {
         await _performPowerUp(repo);
       } else {
+        // Same as tradingMT5: Power off needs a 5-second hold to confirm.
+        if (!await confirmPowerOff(context, closingApp: false)) return;
         await _showRetireSheet(status.grids.appRunning);
-        repo.pause();
-        await repo.stopEngineProcess();
-        _notify('Powered down.', success: true);
+        final stopped = await repo.powerOff();
+        _notify(
+          stopped
+              ? 'Powered down — engine stopped.'
+              : 'Powered down, but the engine process would not stop.',
+          success: stopped,
+        );
       }
       ref.invalidate(statusReportProvider);
     } catch (e) {

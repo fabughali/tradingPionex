@@ -106,9 +106,6 @@ worth watching closely on first real use:
   used, but TradingView's own UI could shift them over time.
 - The full close-all/reopen-both cycle (`enforceCustomScripts`) hasn't been
   exercised end-to-end by me — only the read/verify paths have.
-- `launch.dart`'s `pkill` + relaunch flow (killing/restarting TradingView
-  Desktop) hasn't been exercised at all — test this deliberately before
-  relying on it, ideally with TradingView state you don't mind losing.
 
 ## Minor note
 
@@ -131,4 +128,4 @@ worth watching closely on first real use:
 - No automated test suite beyond the one boot smoke test
   (`test/widget_test.dart`) — same as the original, which had no
   package.json test scripts either; verification here is `dart analyze` +
-  `flutter build linux` (both currently clean) + manual/live checks.
+  `flutter build windows` (both currently clean) + manual/live checks.

@@ -1,241 +1,203 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:trading_pionex/data/technique/worm10_decision.dart';
+import 'package:trading_pionex/data/models/signal.dart';
+import 'package:trading_pionex/data/models/trade_direction.dart';
 
-Worm10Bar _bar({
-  required int t,
-  bool hh = false,
-  bool ll = false,
-  bool zb = false,
-  bool zs = false,
-  bool stBuy = false,
-  bool stSell = false,
-  String? zone,
-}) => Worm10Bar(
-  time: t,
-  hh: hh,
-  ll: ll,
-  zigzagBuy: zb,
-  zigzagSell: zs,
-  stBuy: stBuy,
-  stSell: stSell,
-  rsiZone: zone,
-);
+Worm10Check checkWith({
+  List<Signal> zigzag = const [],
+  List<Signal> supertrend = const [],
+  List<RsiZoneSample> rsi = const [],
+}) {
+  return Worm10Check(
+    symbol: 'TESTUSD',
+    zigzag: BuySellCheck(symbol: 'TESTUSD', signals: zigzag, latestBarTime: null),
+    supertrend: BuySellCheck(symbol: 'TESTUSD', signals: supertrend, latestBarTime: null),
+    rsiZones: rsi,
+    latestBarTime: null,
+  );
+}
 
 void main() {
-  group('deriveWorm10Events', () {
-    test('HH without Supertrend-buy state is ignored completely', () {
-      final events = deriveWorm10Events([
-        _bar(t: 1, stSell: true, zone: 'green'),
-        _bar(t: 2, hh: true, zone: 'green'), // state is sell, not buy -> ignored
-      ]);
-      expect(events, isEmpty);
+  group('worm10EventKindFromWire / toWire round-trip', () {
+    test('every kind survives a wire round-trip unchanged', () {
+      for (final kind in Worm10EventKind.values) {
+        final wire = worm10EventKindToWire(kind);
+        expect(worm10EventKindFromWire(wire), kind);
+      }
     });
 
-    test('HH without the right RSI zone is ignored completely', () {
-      final events = deriveWorm10Events([
-        _bar(t: 1, stBuy: true, zone: 'white'),
-        _bar(t: 2, hh: true, zone: 'white'), // state buy, but zone not green/yellow
-      ]);
-      expect(events, isEmpty);
+    test('an unknown wire string throws rather than silently defaulting', () {
+      expect(() => worm10EventKindFromWire('SELL_CLOSE1'), throwsArgumentError);
     });
 
-    test('full confluence on one bar fires SELL_OPEN1', () {
-      final events = deriveWorm10Events([
-        _bar(t: 1, stBuy: true, zone: 'green'),
-        _bar(t: 2, hh: true, zone: 'green'),
-      ]);
-      expect(events, [const Worm10Event(type: Worm10EventType.sellOpen1, time: 2)]);
-    });
-
-    test('HH repeats across several bars with confluence held throughout -> one swing, last bar kept', () {
-      final events = deriveWorm10Events([
-        _bar(t: 1, stBuy: true, zone: 'green'),
-        _bar(t: 2, hh: true, zone: 'green'),
-        _bar(t: 3, zone: 'green'), // no HH this bar, confluence still holds
-        _bar(t: 4, hh: true, zone: 'yellow'), // HH again, zone moved but still valid
-        _bar(t: 5, zone: 'yellow'),
-      ]);
-      expect(events, [const Worm10Event(type: Worm10EventType.sellOpen1, time: 4)]);
-    });
-
-    test('RSI leaving the zone in between splits into two separate swings', () {
-      final events = deriveWorm10Events([
-        _bar(t: 1, stBuy: true, zone: 'green'),
-        _bar(t: 2, hh: true, zone: 'green'),
-        _bar(t: 3, zone: 'white'), // confluence breaks here
-        _bar(t: 4, zone: 'green'), // confluence resumes, but this is a NEW run
-        _bar(t: 5, hh: true, zone: 'green'),
-      ]);
-      expect(events, [
-        const Worm10Event(type: Worm10EventType.sellOpen1, time: 2),
-        const Worm10Event(type: Worm10EventType.sellOpen1, time: 5),
-      ]);
-    });
-
-    test('Supertrend flip in between also splits into two swings', () {
-      final events = deriveWorm10Events([
-        _bar(t: 1, stBuy: true, zone: 'green'),
-        _bar(t: 2, hh: true, zone: 'green'),
-        _bar(t: 3, stSell: true, zone: 'green'), // state flips to sell mid-run
-        _bar(t: 4, stBuy: true, zone: 'green'), // flips back to buy
-        _bar(t: 5, hh: true, zone: 'green'),
-      ]);
-      expect(events, [
-        const Worm10Event(type: Worm10EventType.sellOpen1, time: 2),
-        const Worm10Event(type: Worm10EventType.sellOpen1, time: 5),
-      ]);
-    });
-
-    test('zigzag BUY keeps only the first, even across a gap with nothing in between', () {
-      final events = deriveWorm10Events([
-        _bar(t: 1, zb: true),
-        _bar(t: 2, zb: true),
-        _bar(t: 3, zb: true),
-        _bar(t: 4),
-        _bar(t: 5, zb: true),
-      ]);
-      expect(events, [const Worm10Event(type: Worm10EventType.zigzagBuy, time: 1)]);
-    });
-
-    test('a different event between two zigzag BUYs keeps both', () {
-      final events = deriveWorm10Events([
-        _bar(t: 1, zb: true),
-        _bar(t: 2, zs: true),
-        _bar(t: 3),
-        _bar(t: 4, zb: true),
-      ]);
-      expect(events, [
-        const Worm10Event(type: Worm10EventType.zigzagBuy, time: 1),
-        const Worm10Event(type: Worm10EventType.zigzagSell, time: 2),
-        const Worm10Event(type: Worm10EventType.zigzagBuy, time: 4),
-      ]);
-    });
-
-    test('a zigzag between two matching HHs keeps both HHs', () {
-      final events = deriveWorm10Events([
-        _bar(t: 1, stBuy: true, zone: 'green'),
-        _bar(t: 2, hh: true, zone: 'green'),
-        _bar(t: 3, zs: true, zone: 'green'),
-        _bar(t: 4, hh: true, zone: 'green'),
-      ]);
-      expect(events, [
-        const Worm10Event(type: Worm10EventType.sellOpen1, time: 2),
-        const Worm10Event(type: Worm10EventType.zigzagSell, time: 3),
-        const Worm10Event(type: Worm10EventType.sellOpen1, time: 4),
-      ]);
-    });
-
-    test('a bar with no RSI reading does not break a swing', () {
-      final events = deriveWorm10Events([
-        _bar(t: 1, stBuy: true, zone: 'green'),
-        _bar(t: 2, hh: true, zone: 'green'),
-        _bar(t: 3),
-        _bar(t: 4, hh: true, zone: 'green'),
-      ]);
-      expect(events, [const Worm10Event(type: Worm10EventType.sellOpen1, time: 4)]);
-    });
-
-    test('Supertrend state persists forward from one old tick', () {
-      final events = deriveWorm10Events([
-        _bar(t: 50, stSell: true),
-        _bar(t: 9999, ll: true, zone: 'blue'),
-      ]);
-      expect(events, [const Worm10Event(type: Worm10EventType.buyOpen1, time: 9999)]);
-    });
-
-    test('no Supertrend tick yet means no OPEN1', () {
-      expect(deriveWorm10Events([_bar(t: 200, ll: true, zone: 'blue')]), isEmpty);
-    });
-
-    test('same-bar Supertrend tick counts for that same bar\'s own confluence check', () {
-      final events = deriveWorm10Events([
-        _bar(t: 1, stSell: true, zone: 'green'),
-        // stBuy and HH fire on the exact same bar - state must already be
-        // "buy" for THIS bar's own HH check, not lag by one bar.
-        _bar(t: 2, stBuy: true, hh: true, zone: 'green'),
-      ]);
-      expect(events, [const Worm10Event(type: Worm10EventType.sellOpen1, time: 2)]);
-    });
-
-    test('unsorted input is sorted before processing', () {
-      final events = deriveWorm10Events([
-        _bar(t: 2, hh: true, zone: 'green'),
-        _bar(t: 1, stBuy: true, zone: 'green'),
-      ]);
-      expect(events, [const Worm10Event(type: Worm10EventType.sellOpen1, time: 2)]);
+    test('worm10DisplayLabelOrRaw tolerates a non-worm10 wire value (e.g. Signal Flip\'s own tags)', () {
+      expect(worm10DisplayLabelOrRaw('HH'), 'HH');
+      expect(worm10DisplayLabelOrRaw(null), isNull);
+      expect(worm10DisplayLabelOrRaw('BUY_OPEN1'), 'LL');
     });
   });
 
-  group('candle timing (bar time is the OPEN time)', () {
-    const hour = Duration(hours: 1);
-    const bar = 1800000000;
-    DateTime at(int sec) =>
-        DateTime.fromMillisecondsSinceEpoch(sec * 1000, isUtc: true);
-
-    test('still-forming candle is not closed; closes at +1 period', () {
-      expect(isCandleClosed(bar, hour, at(bar + 3599)), isFalse);
-      expect(isCandleClosed(bar, hour, at(bar + 3600)), isTrue);
+  group('deriveWorm10Events - "case 1" confluence gating (HH/LL + RSI + Supertrend)', () {
+    test('LL qualifies into buyOpen1 only when RSI is blue/purple AND Supertrend is short', () {
+      final check = checkWith(
+        zigzag: [const Signal(tag: SignalTag.ll, time: 200)],
+        supertrend: [const Signal(tag: SignalTag.sell, time: 50)],
+        rsi: [const RsiZoneSample(zone: RsiZone.blue, time: 200)],
+      );
+      final events = deriveWorm10Events(check);
+      expect(events, hasLength(1));
+      expect(events.single.kind, Worm10EventKind.buyOpen1);
+      expect(events.single.time, 200);
     });
 
-    test('the wait ends at +2 periods, one full candle after its own close', () {
-      expect(worm10WaitIsOver(bar, hour, at(bar + 3600)), isFalse);
-      expect(worm10WaitIsOver(bar, hour, at(bar + 7199)), isFalse);
-      expect(worm10WaitIsOver(bar, hour, at(bar + 7200)), isTrue);
+    test('LL with the wrong RSI zone (white) produces no event at all', () {
+      final check = checkWith(
+        zigzag: [const Signal(tag: SignalTag.ll, time: 200)],
+        supertrend: [const Signal(tag: SignalTag.sell, time: 50)],
+        rsi: [const RsiZoneSample(zone: RsiZone.white, time: 200)],
+      );
+      expect(deriveWorm10Events(check), isEmpty);
+    });
+
+    test('LL with correct RSI but Supertrend still long (not yet flipped short) produces no event', () {
+      final check = checkWith(
+        zigzag: [const Signal(tag: SignalTag.ll, time: 200)],
+        supertrend: [const Signal(tag: SignalTag.buy, time: 50)],
+        rsi: [const RsiZoneSample(zone: RsiZone.purple, time: 200)],
+      );
+      expect(deriveWorm10Events(check), isEmpty);
+    });
+
+    test('LL with no Supertrend signal at all yet (null direction) produces no event', () {
+      final check = checkWith(
+        zigzag: [const Signal(tag: SignalTag.ll, time: 200)],
+        supertrend: const [],
+        rsi: [const RsiZoneSample(zone: RsiZone.blue, time: 200)],
+      );
+      expect(deriveWorm10Events(check), isEmpty);
+    });
+
+    test('HH qualifies into sellOpen1 only when RSI is green/yellow AND Supertrend is long', () {
+      final check = checkWith(
+        zigzag: [const Signal(tag: SignalTag.hh, time: 300)],
+        supertrend: [const Signal(tag: SignalTag.buy, time: 50)],
+        rsi: [const RsiZoneSample(zone: RsiZone.green, time: 300)],
+      );
+      final events = deriveWorm10Events(check);
+      expect(events, hasLength(1));
+      expect(events.single.kind, Worm10EventKind.sellOpen1);
+    });
+
+    test('Supertrend direction is sparse and persists forward until the next discrete signal', () {
+      // Supertrend flips short at t=50, nothing else ever updates it - an
+      // LL at t=9999 must still see "short" from that one old signal.
+      final check = checkWith(
+        zigzag: [const Signal(tag: SignalTag.ll, time: 9999)],
+        supertrend: [const Signal(tag: SignalTag.sell, time: 50)],
+        rsi: [const RsiZoneSample(zone: RsiZone.blue, time: 9999)],
+      );
+      expect(deriveWorm10Events(check).single.kind, Worm10EventKind.buyOpen1);
     });
   });
 
-  group('worm10DecisionFor', () {
-    test('no trade + OPEN1 opens; bare zigzag does nothing', () {
-      expect(
-        worm10DecisionFor(Worm10Running.none, Worm10EventType.buyOpen1).action,
-        Worm10Action.open,
+  group('deriveWorm10Events - "case 3" bare BUY/SELL (never gated)', () {
+    test('a bare BUY tag always produces a zigzagBuy event, RSI/Supertrend irrelevant', () {
+      final check = checkWith(
+        zigzag: [const Signal(tag: SignalTag.buy, time: 100)],
+        supertrend: const [],
+        rsi: const [],
       );
-      expect(
-        worm10DecisionFor(Worm10Running.none, Worm10EventType.sellOpen1).action,
-        Worm10Action.open,
-      );
-      expect(
-        worm10DecisionFor(Worm10Running.none, Worm10EventType.zigzagBuy).action,
-        Worm10Action.none,
-      );
-      expect(
-        worm10DecisionFor(Worm10Running.none, Worm10EventType.zigzagSell).action,
-        Worm10Action.none,
-      );
+      final events = deriveWorm10Events(check);
+      expect(events, hasLength(1));
+      expect(events.single.kind, Worm10EventKind.zigzagBuy);
     });
 
-    test('BUY running: recycle on BUY_OPEN1, flip on SELL_OPEN1 or ZIGZAG_SELL, update-only on ZIGZAG_BUY', () {
-      expect(
-        worm10DecisionFor(Worm10Running.buy, Worm10EventType.buyOpen1).action,
-        Worm10Action.recycle,
+    test('a bare SELL tag always produces a zigzagSell event', () {
+      final check = checkWith(zigzag: [const Signal(tag: SignalTag.sell, time: 100)]);
+      expect(deriveWorm10Events(check).single.kind, Worm10EventKind.zigzagSell);
+    });
+  });
+
+  group('deriveWorm10Events - coalescing consecutive same-kind bars into one real swing', () {
+    test('buyOpen1 qualifying on every bar across a continuous run collapses to the LAST bar', () {
+      final rsi = [
+        for (final t in [100, 200, 300, 400]) RsiZoneSample(zone: RsiZone.blue, time: t),
+      ];
+      final check = checkWith(
+        zigzag: [const Signal(tag: SignalTag.ll, time: 200), const Signal(tag: SignalTag.ll, time: 400)],
+        supertrend: [const Signal(tag: SignalTag.sell, time: 50)],
+        rsi: rsi,
       );
-      final flipFromSellOpen1 = worm10DecisionFor(Worm10Running.buy, Worm10EventType.sellOpen1);
-      expect(flipFromSellOpen1.action, Worm10Action.flip);
-      expect(flipFromSellOpen1.direction, Worm10Direction.sell);
-      final flipFromZigzagSell = worm10DecisionFor(Worm10Running.buy, Worm10EventType.zigzagSell);
-      expect(flipFromZigzagSell.action, Worm10Action.flip);
-      expect(flipFromZigzagSell.direction, Worm10Direction.sell);
-      expect(
-        worm10DecisionFor(Worm10Running.buy, Worm10EventType.zigzagBuy).action,
-        Worm10Action.updateOnly,
-      );
+      final events = deriveWorm10Events(check);
+      expect(events, hasLength(1), reason: 'the 200 and 400 LLs qualify on every bar in between, so they are one real swing');
+      expect(events.single.time, 400);
     });
 
-    test('SELL running: mirror of BUY running', () {
-      expect(
-        worm10DecisionFor(Worm10Running.sell, Worm10EventType.sellOpen1).action,
-        Worm10Action.recycle,
+    test('a break in the qualifying condition between two LLs makes them two separate swings', () {
+      final rsi = [
+        const RsiZoneSample(zone: RsiZone.blue, time: 200),
+        const RsiZoneSample(zone: RsiZone.white, time: 300), // breaks continuity
+        const RsiZoneSample(zone: RsiZone.purple, time: 400),
+      ];
+      final check = checkWith(
+        zigzag: [const Signal(tag: SignalTag.ll, time: 200), const Signal(tag: SignalTag.ll, time: 400)],
+        supertrend: [const Signal(tag: SignalTag.sell, time: 50)],
+        rsi: rsi,
       );
-      final flipFromBuyOpen1 = worm10DecisionFor(Worm10Running.sell, Worm10EventType.buyOpen1);
-      expect(flipFromBuyOpen1.action, Worm10Action.flip);
-      expect(flipFromBuyOpen1.direction, Worm10Direction.buy);
-      final flipFromZigzagBuy = worm10DecisionFor(Worm10Running.sell, Worm10EventType.zigzagBuy);
-      expect(flipFromZigzagBuy.action, Worm10Action.flip);
-      expect(flipFromZigzagBuy.direction, Worm10Direction.buy);
-      expect(
-        worm10DecisionFor(Worm10Running.sell, Worm10EventType.zigzagSell).action,
-        Worm10Action.updateOnly,
+      final events = deriveWorm10Events(check);
+      expect(events, hasLength(2), reason: 'RSI left blue/purple at t=300, so these are two distinct swings, not one');
+      expect(events.map((e) => e.time).toList(), [200, 400]);
+    });
+
+    test('zigzagBuy keeps the FIRST of a consecutive run, the opposite of buyOpen1/sellOpen1', () {
+      final check = checkWith(
+        zigzag: [const Signal(tag: SignalTag.buy, time: 1000), const Signal(tag: SignalTag.buy, time: 1100)],
       );
+      final events = deriveWorm10Events(check);
+      expect(events, hasLength(1));
+      expect(events.single.time, 1000, reason: 'zigzagBuy/zigzagSell mark where the signal FIRST fires, not a swing extreme');
+    });
+  });
+
+  group('worm10DecisionFor - the one pure state-transition rule', () {
+    test('buyOpen1 from flat opens fresh long', () {
+      final d = worm10DecisionFor(null, Worm10EventKind.buyOpen1);
+      expect(d.action, Worm10Action.openFresh);
+      expect(d.resultDirection, TradeDirection.long);
+    });
+
+    test('buyOpen1 while already long recycles (close + reopen) the same direction', () {
+      final d = worm10DecisionFor(TradeDirection.long, Worm10EventKind.buyOpen1);
+      expect(d.action, Worm10Action.recycle);
+      expect(d.resultDirection, TradeDirection.long);
+    });
+
+    test('buyOpen1 while short flips to long', () {
+      final d = worm10DecisionFor(TradeDirection.short, Worm10EventKind.buyOpen1);
+      expect(d.action, Worm10Action.flip);
+      expect(d.resultDirection, TradeDirection.long);
+    });
+
+    test('sellOpen1 mirrors buyOpen1 exactly for the short side', () {
+      expect(worm10DecisionFor(null, Worm10EventKind.sellOpen1).action, Worm10Action.openFresh);
+      expect(worm10DecisionFor(TradeDirection.short, Worm10EventKind.sellOpen1).action, Worm10Action.recycle);
+      expect(worm10DecisionFor(TradeDirection.long, Worm10EventKind.sellOpen1).action, Worm10Action.flip);
+    });
+
+    test('zigzagBuy while short flips; while long is just an Update; from flat is a no-op', () {
+      expect(worm10DecisionFor(TradeDirection.short, Worm10EventKind.zigzagBuy).action, Worm10Action.flip);
+      final whileLong = worm10DecisionFor(TradeDirection.long, Worm10EventKind.zigzagBuy);
+      expect(whileLong.action, Worm10Action.update);
+      expect(whileLong.resultDirection, TradeDirection.long);
+      final fromFlat = worm10DecisionFor(null, Worm10EventKind.zigzagBuy);
+      expect(fromFlat.action, Worm10Action.none);
+      expect(fromFlat.resultDirection, isNull);
+    });
+
+    test('zigzagSell mirrors zigzagBuy exactly for the short side', () {
+      expect(worm10DecisionFor(TradeDirection.long, Worm10EventKind.zigzagSell).action, Worm10Action.flip);
+      expect(worm10DecisionFor(TradeDirection.short, Worm10EventKind.zigzagSell).action, Worm10Action.update);
+      expect(worm10DecisionFor(null, Worm10EventKind.zigzagSell).action, Worm10Action.none);
     });
   });
 }

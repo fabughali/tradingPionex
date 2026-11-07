@@ -108,7 +108,6 @@ class AppConfig {
   const AppConfig({
     this.pollIntervalSec = 5,
     this.autoReserve = true,
-    this.remoteSession = true,
     this.cdp = const CdpConfig(),
     this.gridPairs = const [],
     this.technique = const TechniqueConfig(),
@@ -119,16 +118,6 @@ class AppConfig {
   final int pollIntervalSec;
   final bool autoReserve;
 
-  /// User-controlled, not auto-detected - confirmed live 2026-09-05 that
-  /// `loginctl`'s own Remote= flag reports "no" even during an active,
-  /// confirmed-crash-prone remote-access session on this machine, so
-  /// guessing this from process/session info risks TradingView opening
-  /// visibly on a session where that has repeatedly crashed the whole
-  /// desktop. true (the safe default) keeps TradingView on the isolated,
-  /// invisible display; false shows it normally on the real display. The
-  /// user flips this in Settings when they know which kind of session
-  /// they're actually on right now.
-  final bool remoteSession;
   final CdpConfig cdp;
   final List<GridPairConfig> gridPairs;
   final TechniqueConfig technique;
@@ -138,7 +127,6 @@ class AppConfig {
   factory AppConfig.fromJson(Map<String, dynamic> json) => AppConfig(
     pollIntervalSec: (json['poll_interval_sec'] as num?)?.toInt() ?? 5,
     autoReserve: json['autoReserve'] as bool? ?? true,
-    remoteSession: json['remote_session'] as bool? ?? true,
     cdp: CdpConfig.fromJson(json['cdp'] as Map<String, dynamic>?),
     gridPairs: ((json['grid_pairs'] as List?) ?? const [])
         .map((e) => GridPairConfig.fromJson(e as Map<String, dynamic>))
@@ -154,7 +142,6 @@ class AppConfig {
   Map<String, dynamic> toJson() => {
     'poll_interval_sec': pollIntervalSec,
     'autoReserve': autoReserve,
-    'remote_session': remoteSession,
     'cdp': cdp.toJson(),
     'grid_pairs': gridPairs.map((e) => e.toJson()).toList(),
     'technique': technique.toJson(),

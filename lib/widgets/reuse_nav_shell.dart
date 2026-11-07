@@ -60,16 +60,8 @@ class _ReuseNavShellState extends ConsumerState<ReuseNavShell> {
   DateTime? _lastStartTs;
   DateTime? _lastStopTs;
 
-  // Push notification (2026-09-17, per the user: "along with voice, push
-  // notification appears in system... same as the voice") - fires
-  // alongside the voice alert, same phrase, same mute toggle. The
-  // notification also carries a timestamp (per the user's explicit
-  // follow-up) - the voice itself stays exactly as spoken, unchanged.
-  // Per the user (2026-09-19): speak the interval too - "3 m start long
-  // LTC" / "3 m close LTC" instead of leaving it out entirely. A trailing
-  // space separates digit from letter (e.g. "3m" -> "3 m", "1H" -> "1 H")
-  // since Piper reads the label more clearly spoken as two tokens than as
-  // one run-together word.
+  // Speaks the interval too ("3 m start long LTC"): digit and letter are
+  // spaced so the speech reads them as two words.
   String _spokenCategory(AutoCategory? category) {
     if (category == null) return '';
     final spaced = category.label.replaceAllMapped(
@@ -79,25 +71,14 @@ class _ReuseNavShellState extends ConsumerState<ReuseNavShell> {
     return '$spaced ';
   }
 
-  // Serializes every `speak` call (2026-09-20, per the user: "i feel
-  // there is echo in the sound") - chaining onto this same Future means a
-  // second phrase's synthesis+playback only ever starts once the previous
-  // one has genuinely finished (see SoundService.speak's own doc comment
-  // for the full root cause: two events landing close together, e.g. the
-  // paired close+start announcement, used to launch two overlapping
-  // `aplay` processes). Never awaited by the caller - a burst of several
-  // events queues up and plays back-to-back instead of overlapping,
-  // rather than blocking the UI.
+  // One phrase at a time: each speak waits for the previous to finish, so a
+  // burst of events plays back-to-back instead of overlapping.
   Future<void> _speechQueue = Future<void>.value();
 
   void _speak(String muteKey, String text) {
     if (ref.read(soundMuteProvider)[muteKey] == true) return;
     final sound = ref.read(soundServiceProvider);
     _speechQueue = _speechQueue.then((_) => sound.speak(text));
-    final now = DateTime.now();
-    String two(int n) => n.toString().padLeft(2, '0');
-    final stamp = '${two(now.hour)}:${two(now.minute)}:${two(now.second)}';
-    sound.notify('$text — $stamp');
   }
 
   Future<void> _showInternetDownDialog() async {

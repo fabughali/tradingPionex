@@ -68,7 +68,11 @@ void main() {
       '/json/new': RegExp(r'/json/new'),
       '/json/close': RegExp(r'/json/close'),
       '/json/activate': RegExp(r'/json/activate'),
-      'taskkill': RegExp(r'taskkill', caseSensitive: false),
+      // Killing by image name would take TradingView (or anything else
+      // sharing a name) down; the only kill allowed is our own engine by PID.
+      'taskkill /IM': RegExp(r'''['"]/IM['"]|/IM\s''', caseSensitive: false),
+      'pkill': RegExp(r'''['"]pkill['"]'''),
+      'killall': RegExp(r'''['"]killall['"]'''),
     };
     final hits = <String>[];
     var pageReloads = 0;
@@ -82,5 +86,16 @@ void main() {
     }
     expect(hits, isEmpty);
     expect(pageReloads, 1, reason: 'Page.reload only inside reloadOwnTab');
+
+    // The one real taskkill call: our own engine, by PID, nothing else.
+    final taskkillCalls = <String>[];
+    for (final f in Directory('lib').listSync(recursive: true)) {
+      if (f is! File || !f.path.endsWith('.dart')) continue;
+      for (final m in RegExp(r"Process\.run\(\s*'taskkill'[^)]*\)")
+          .allMatches(f.readAsStringSync())) {
+        taskkillCalls.add(m.group(0)!.replaceAll(RegExp(r'\s+'), ' '));
+      }
+    }
+    expect(taskkillCalls, ["Process.run('taskkill', ['/F', '/PID', '\$pid'])"]);
   });
 }

@@ -1,7 +1,7 @@
 import 'dart:convert';
 
 import '../models/range_result.dart';
-import '../technique/worm10_decision.dart';
+import '../models/signal.dart';
 import 'cdp_client.dart';
 import 'chart_state.dart' show customScripts;
 
@@ -220,40 +220,32 @@ Future<Map<String, String>> readStudyValues(
   );
 }
 
-/// Result of [readWorm10Bars] - raw bars only, no derivation. Callers run
-/// `deriveWorm10Events` (worm10_decision.dart) on [bars] themselves.
-class Worm10Check {
-  const Worm10Check({
-    required this.symbol,
-    required this.bars,
-    required this.latestBarTime,
-  });
-  final String symbol;
-  final List<Worm10Bar> bars;
-
-  /// The newest bar's open time - the candle-gate anchor, same convention
-  /// as [BuySellCheck.latestBarTime].
-  final int? latestBarTime;
-}
-
-/// Worm10 Hybrid Decision technique (2026-10-25, per the user: "and remove
-/// any old technique from code and from prd") - replaces
-/// [readWormSignals]/the worm_9_26 technique entirely, not alongside it.
-/// Reads worm_10_26's six plots (HH, LL, zigzag BUY/SELL, discrete
-/// Supertrend Buy/Sell - all confirmed live via CDP against the real
-/// chart, including the case-sensitive distinction between `BUY`/`SELL`
-/// and `Buy`/`Sell`, and that the *continuous* `SuperTrend Buy`/
-/// `SuperTrend Sell` lines are genuinely separate plots, never read here)
-/// plus spy_9_26's five RSI zones, aligned by bar time, into raw
-/// [Worm10Bar]s - see `worm10_decision.dart`'s `deriveWorm10Events` for
-/// the pure derivation logic this feeds (event confluence, swing dedup,
-/// the decision table) - this function does no derivation itself, purely
-/// mechanical extraction.
-Future<Worm10Check> readWorm10Bars(
+/// worm_10_26 + spy_9_26 combined read, for the third decision technique
+/// (2026-10-14). ONE evaluate() call across both scripts, same
+/// single-round-trip discipline as every other reader here. Confirmed
+/// directly with the user, after an initial wrong guess (continuous
+/// "SuperTrend Buy"/"SuperTrend Sell" trend-state flags), exactly which
+/// plot each spec case maps to:
+///
+/// - `New Higher High`/`New Lower Low` -> [Worm10Check.zigzag]'s hh/ll tags.
+/// - `BUY`/`SELL` (all-caps, worm_9_26 heritage) -> [Worm10Check.zigzag]'s
+///   buy/sell tags - drives the CLOSE-signal "case 3" only ("if you view
+///   the buy/sell signals in technique 1 ... case 3 are the buy/sell
+///   zigzag signals, not buy/sell supertrend signals").
+/// - `Buy`/`Sell` (mixed case, discrete Supertrend entry, same plots
+///   [readSupertrendSignals] already reads) -> [Worm10Check.supertrend] -
+///   drives the OPEN-signal "case 1" confluence's "supertrend need to be
+///   X" leg only ("worm 10 has two buy signals and two sell signals ...
+///   one (buy/sell) for super trend ... those signals are for case 1
+///   open signals").
+/// - The continuous `SuperTrend Buy`/`SuperTrend Sell` trend-state flags
+///   are NOT read at all, same reasoning as [readSupertrendSignals].
+/// - spy_9_26's five RSI zone plots -> [Worm10Check.rsiZones].
+Future<Worm10Check> readWorm10Signals(
   CdpClient cdp,
   String symbol,
-  String wormScriptPart,
-  String rsiScriptPart, {
+  String worm10ScriptIdPart,
+  String rsiScriptIdPart, {
   void Function(String message)? onDebugError,
 }) async {
   final expr =
@@ -261,23 +253,22 @@ Future<Worm10Check> readWorm10Bars(
     try {
       var chart = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget;
       var sources = chart.model().model().dataSources();
-      var wormSrc = null, rsiSrc = null;
+      var worm10Src = null, rsiSrc = null;
       for (var si = 0; si < sources.length; si++) {
         var s = sources[si];
-        if (!s.metaInfo) continue;
         var part = '';
         try { part = s.metaInfo().scriptIdPart || ''; } catch (e) {}
-        if (part === ${jsonEncode(wormScriptPart)}) wormSrc = s;
-        else if (part === ${jsonEncode(rsiScriptPart)}) rsiSrc = s;
+        if (part === ${jsonEncode(worm10ScriptIdPart)}) worm10Src = s;
+        if (part === ${jsonEncode(rsiScriptIdPart)}) rsiSrc = s;
       }
-      if (!wormSrc || !rsiSrc) return { found: false, error: 'one or both scripts not found' };
-
-      // Never read plots from a series that hasn't loaded THIS symbol: a
-      // stuck feed keeps the previous pair's bars under the new pair's label
-      // (see chartDataMismatchReason).
+      if (!worm10Src) return { error: 'worm_10_26 not found' };
+      if (!rsiSrc) return { error: 'spy_9_26 not found' };
+      // 2026-10-25 - never read plots from a series that hasn't loaded
+      // THIS symbol (a stuck feed kept LTCUSDT's daily bars under every
+      // other pair's label, see chartDataMismatchReason).
       var mainSeries = chart.model().mainSeries();
       if (typeof mainSeries.isLoading === 'function' && mainSeries.isLoading()) {
-        return { found: false, error: 'main series still loading - refusing to read' };
+        return { error: 'main series still loading - refusing to read' };
       }
       var loadedInfo = typeof mainSeries.symbolInfo === 'function' ? mainSeries.symbolInfo() : null;
       function tickerBase(s) {
@@ -289,7 +280,7 @@ Future<Worm10Check> readWorm10Bars(
       }
       var loadedName = loadedInfo ? (loadedInfo.name || loadedInfo.ticker || '') : '';
       if (!loadedName || tickerBase(loadedName) !== tickerBase(${jsonEncode(symbol)})) {
-        return { found: false, error: 'main series holds ' + (loadedName || 'nothing') + ', not ' + ${jsonEncode(symbol)} + ' - refusing to read' };
+        return { error: 'main series holds ' + (loadedName || 'nothing') + ', not ' + ${jsonEncode(symbol)} + ' - refusing to read' };
       }
 
       function colOf(plotId) {
@@ -305,42 +296,6 @@ Future<Worm10Check> readWorm10Bars(
         }
         return null;
       }
-      function findColByColor(src, color) {
-        var meta = src.metaInfo();
-        var styles = meta.styles || {};
-        for (var sk in styles) {
-          var se = styles[sk];
-          if (se && se.title && se.title.indexOf('(' + color + ')') !== -1) return colOf(sk);
-        }
-        return null;
-      }
-
-      var hhCol = findCol(wormSrc, 'New Higher High');
-      var llCol = findCol(wormSrc, 'New Lower Low');
-      var zbCol = findCol(wormSrc, 'BUY');
-      var zsCol = findCol(wormSrc, 'SELL');
-      var stBuyCol = findCol(wormSrc, 'Buy');
-      var stSellCol = findCol(wormSrc, 'Sell');
-      var yellowCol = findColByColor(rsiSrc, 'Yellow');
-      var greenCol = findColByColor(rsiSrc, 'Green');
-      var whiteCol = findColByColor(rsiSrc, 'White');
-      var purpleCol = findColByColor(rsiSrc, 'Purple');
-      var blueCol = findColByColor(rsiSrc, 'Blue');
-      if (hhCol == null || llCol == null || zbCol == null || zsCol == null ||
-          stBuyCol == null || stSellCol == null || yellowCol == null ||
-          greenCol == null || whiteCol == null || purpleCol == null || blueCol == null) {
-        var wormTitles = [], rsiTitles = [];
-        try {
-          var ws = wormSrc.metaInfo().styles || {};
-          for (var wk in ws) { wormTitles.push(ws[wk] && ws[wk].title); }
-        } catch (e) {}
-        try {
-          var rs = rsiSrc.metaInfo().styles || {};
-          for (var rk in rs) { rsiTitles.push(rs[rk] && rs[rk].title); }
-        } catch (e) {}
-        return { found: true, error: 'plot columns not found - worm_10_26 titles: ' + JSON.stringify(wormTitles) + ' - spy_9_26 titles: ' + JSON.stringify(rsiTitles) };
-      }
-
       function rowsOf(s) {
         var items = (s._data && s._data._items) ? s._data._items : null;
         var out = [];
@@ -353,75 +308,154 @@ Future<Worm10Check> readWorm10Bars(
         }
         return out;
       }
-
       var isNum = function (v) { return typeof v === 'number' && !isNaN(v) && v !== 0; };
-      // Each zone title is a "line" plot carrying the same raw RSI value
-      // whichever zone is active, paired with an untitled "colorer" plot right
-      // after it: null when that zone is inactive, a small index when active
-      // (0 is a genuine active value). So the zone is read from the indicator's
-      // own colorer at lineCol + 1, never worked out from the line value.
-      var isActiveColorer = function (v) { return typeof v === 'number' && !isNaN(v); };
-      var zoneByTime = {};
-      var rsiRows = rowsOf(rsiSrc);
-      for (var i = 0; i < rsiRows.length; i++) {
-        var row = rsiRows[i];
+
+      var hhCol = findCol(worm10Src, 'New Higher High');
+      var llCol = findCol(worm10Src, 'New Lower Low');
+      var zBuyCol = findCol(worm10Src, 'BUY');
+      var zSellCol = findCol(worm10Src, 'SELL');
+      var stBuyCol = findCol(worm10Src, 'Buy');
+      var stSellCol = findCol(worm10Src, 'Sell');
+      if (hhCol == null || llCol == null || zBuyCol == null || zSellCol == null ||
+          stBuyCol == null || stSellCol == null) {
+        return { error: 'worm_10_26 plot columns not found (hh=' + hhCol + ' ll=' + llCol +
+          ' zBuy=' + zBuyCol + ' zSell=' + zSellCol + ' stBuy=' + stBuyCol + ' stSell=' + stSellCol + ')' };
+      }
+
+      var rsiBlueCol = findCol(rsiSrc, 'RSI &lt;= 20% (Blue)');
+      var rsiPurpleCol = findCol(rsiSrc, 'RSI 20-35% (Purple)');
+      var rsiWhiteCol = findCol(rsiSrc, 'RSI 35-65% (White)');
+      var rsiGreenCol = findCol(rsiSrc, 'RSI 65-80% (Green)');
+      var rsiYellowCol = findCol(rsiSrc, 'RSI &gt;= 80% (Yellow)');
+      if (rsiBlueCol == null || rsiPurpleCol == null || rsiWhiteCol == null ||
+          rsiGreenCol == null || rsiYellowCol == null) {
+        return { error: 'spy_9_26 RSI zone columns not found (blue=' + rsiBlueCol +
+          ' purple=' + rsiPurpleCol + ' white=' + rsiWhiteCol + ' green=' + rsiGreenCol +
+          ' yellow=' + rsiYellowCol + ')' };
+      }
+
+      var zigzagSignals = [];
+      var supertrendSignals = [];
+      var latestBarTime = 0;
+      var worm10Rows = rowsOf(worm10Src);
+      var sortedRows = [];
+      for (var r = 0; r < worm10Rows.length; r++) {
+        var row = worm10Rows[r];
         var t = row[0];
         if (typeof t !== 'number') continue;
-        if (isActiveColorer(row[blueCol + 1])) zoneByTime[t] = 'blue';
-        else if (isActiveColorer(row[purpleCol + 1])) zoneByTime[t] = 'purple';
-        else if (isActiveColorer(row[whiteCol + 1])) zoneByTime[t] = 'white';
-        else if (isActiveColorer(row[greenCol + 1])) zoneByTime[t] = 'green';
-        else if (isActiveColorer(row[yellowCol + 1])) zoneByTime[t] = 'yellow';
+        sortedRows.push(row);
+      }
+      sortedRows.sort(function (a, b) { return a[0] - b[0]; });
+      // 2026-10-17 - "New Higher High"/"New Lower Low" print on EVERY bar
+      // that's a fresh local extreme within an ongoing swing, not just
+      // the one bar the real zigzag pivot/label finally settles on - a
+      // sustained decline can print several separate HH/LL occurrences
+      // before the swing reverses. An earlier attempt to de-duplicate
+      // these HERE (by raw tag, before classification) was wrong: two LL
+      // prints a few hours apart can resolve to DIFFERENT, both-
+      // meaningful event kinds (buyOpen1 vs. the weaker sellClose1)
+      // depending on Supertrend's state at each one - collapsing by raw
+      // tag could silently discard a real close signal in favor of a
+      // later, unrelated open signal (confirmed live: a real SHORT's true
+      // close signal at Oct 13 00:00 got discarded this way). Every raw
+      // occurrence is emitted here, unfiltered - [deriveWorm10Events]
+      // does the de-duplication AFTER classification, where it can tell
+      // the two apart.
+      var wasZBuy = false, wasZSell = false;
+      for (var r = 0; r < sortedRows.length; r++) {
+        var row = sortedRows[r];
+        var t = row[0];
+        if (t > latestBarTime) latestBarTime = t;
+        if (isNum(row[hhCol])) zigzagSignals.push({ time: t, tag: 'HH' });
+        if (isNum(row[llCol])) zigzagSignals.push({ time: t, tag: 'LL' });
+        var isZBuy = isNum(row[zBuyCol]);
+        var isZSell = isNum(row[zSellCol]);
+        if (isZBuy && !wasZBuy) zigzagSignals.push({ time: t, tag: 'BUY' });
+        if (isZSell && !wasZSell) zigzagSignals.push({ time: t, tag: 'SELL' });
+        wasZBuy = isZBuy; wasZSell = isZSell;
+        if (isNum(row[stBuyCol])) supertrendSignals.push({ time: t, tag: 'BUY' });
+        if (isNum(row[stSellCol])) supertrendSignals.push({ time: t, tag: 'SELL' });
+      }
+      zigzagSignals.sort(function (a, b) { return (a.time || 0) - (b.time || 0); });
+      supertrendSignals.sort(function (a, b) { return (a.time || 0) - (b.time || 0); });
+
+      // Each RSI zone title resolves to a shared "line" plot that always
+      // carries the SAME raw RSI value regardless of which zone is active
+      // (TradingView's own conditional-coloring construct: one value plot
+      // paired with a separate, untitled "colorer" plot immediately after
+      // it in the plot list - confirmed live, 2026-10-14, via
+      // metaInfo().plots: plot_0 "line" (Yellow) + plot_1 "colorer", plot_2
+      // "line" (Green) + plot_3 "colorer", etc.). The colorer is `null`
+      // when that zone is NOT active for the bar and a small zone-index
+      // number (0 for Yellow, seen live) when it IS - so the zone check
+      // must read `lineCol + 1`, not the line column itself, and must NOT
+      // exclude 0 (unlike [isNum] above, since 0 is a genuine "active"
+      // value here) - reading the line column directly, as before,
+      // silently misclassified every single bar as "blue" (checked first)
+      // since that raw value is virtually never exactly zero.
+      function isActiveColorer(v) {
+        return typeof v === 'number' && !isNaN(v);
       }
 
-      var latestBarTime = 0;
-      var bars = [];
-      var wormRows = rowsOf(wormSrc);
-      for (var r2 = 0; r2 < wormRows.length; r2++) {
-        var row2 = wormRows[r2];
-        var t2 = row2[0];
-        if (typeof t2 !== 'number') continue;
-        if (t2 > latestBarTime) latestBarTime = t2;
-        bars.push({
-          time: t2,
-          hh: isNum(row2[hhCol]),
-          ll: isNum(row2[llCol]),
-          zigzagBuy: isNum(row2[zbCol]),
-          zigzagSell: isNum(row2[zsCol]),
-          stBuy: isNum(row2[stBuyCol]),
-          stSell: isNum(row2[stSellCol]),
-          rsiZone: zoneByTime[t2] || null
-        });
+      var rsiZones = [];
+      var rsiRows = rowsOf(rsiSrc);
+      for (var rr = 0; rr < rsiRows.length; rr++) {
+        var rrow = rsiRows[rr];
+        var rt = rrow[0];
+        if (typeof rt !== 'number') continue;
+        if (isActiveColorer(rrow[rsiBlueCol + 1])) rsiZones.push({ time: rt, zone: 'blue' });
+        else if (isActiveColorer(rrow[rsiPurpleCol + 1])) rsiZones.push({ time: rt, zone: 'purple' });
+        else if (isActiveColorer(rrow[rsiWhiteCol + 1])) rsiZones.push({ time: rt, zone: 'white' });
+        else if (isActiveColorer(rrow[rsiGreenCol + 1])) rsiZones.push({ time: rt, zone: 'green' });
+        else if (isActiveColorer(rrow[rsiYellowCol + 1])) rsiZones.push({ time: rt, zone: 'yellow' });
       }
-      bars.sort(function (a, b) { return a.time - b.time; });
-      return { found: true, bars: bars, latestBarTime: latestBarTime || null };
+      rsiZones.sort(function (a, b) { return (a.time || 0) - (b.time || 0); });
+
+      return {
+        zigzagSignals: zigzagSignals,
+        supertrendSignals: supertrendSignals,
+        rsiZones: rsiZones,
+        latestBarTime: latestBarTime || null
+      };
     } catch (e) {
-      return { found: false, error: String(e && e.message || e) };
+      return { error: String(e && e.message || e) };
     }
   })()''';
   final raw = await cdp.evaluate(expr) as Map<String, dynamic>?;
   if (raw?['error'] != null) {
     onDebugError?.call(raw!['error'].toString());
   }
-  final bars = ((raw?['bars'] as List?) ?? const [])
+  final zigzagSignals = ((raw?['zigzagSignals'] as List?) ?? const [])
+      .cast<Map<String, dynamic>>()
+      .map(Signal.fromJson)
+      .toList();
+  final supertrendSignals = ((raw?['supertrendSignals'] as List?) ?? const [])
+      .cast<Map<String, dynamic>>()
+      .map(Signal.fromJson)
+      .toList();
+  final latestBarTime = (raw?['latestBarTime'] as num?)?.toInt();
+  final rsiZoneMap = {
+    'blue': RsiZone.blue,
+    'purple': RsiZone.purple,
+    'white': RsiZone.white,
+    'green': RsiZone.green,
+    'yellow': RsiZone.yellow,
+  };
+  final rsiZones = ((raw?['rsiZones'] as List?) ?? const [])
       .cast<Map<String, dynamic>>()
       .map(
-        (b) => Worm10Bar(
-          time: (b['time'] as num).toInt(),
-          hh: b['hh'] as bool,
-          ll: b['ll'] as bool,
-          zigzagBuy: b['zigzagBuy'] as bool,
-          zigzagSell: b['zigzagSell'] as bool,
-          stBuy: b['stBuy'] as bool,
-          stSell: b['stSell'] as bool,
-          rsiZone: b['rsiZone'] as String?,
+        (m) => RsiZoneSample(
+          zone: rsiZoneMap[m['zone'] as String]!,
+          time: (m['time'] as num).toInt(),
         ),
       )
       .toList();
   return Worm10Check(
     symbol: symbol,
-    bars: bars,
-    latestBarTime: (raw?['latestBarTime'] as num?)?.toInt(),
+    zigzag: BuySellCheck(symbol: symbol, signals: zigzagSignals, latestBarTime: latestBarTime),
+    supertrend: BuySellCheck(symbol: symbol, signals: supertrendSignals, latestBarTime: latestBarTime),
+    rsiZones: rsiZones,
+    latestBarTime: latestBarTime,
   );
 }
 

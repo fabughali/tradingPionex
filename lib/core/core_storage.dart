@@ -22,15 +22,27 @@ class CoreStorage {
   static CoreStorage get instance =>
       _instance ??= CoreStorage._(_resolveRootDir());
 
+  /// A storage rooted at [rootDir] - for tests.
+  factory CoreStorage.forRoot(String rootDir) => CoreStorage._(rootDir);
+
   static String _resolveRootDir() {
     final override = Platform.environment['TRADING_PIONEX_HOME'];
     if (override != null && override.trim().isNotEmpty) return override;
-    final home =
-        Platform.environment['HOME'] ??
-        Platform.environment['USERPROFILE'] ??
-        '.';
+    final home = Platform.environment['USERPROFILE'] ?? '.';
     return p.join(home, '.tradingpionex');
   }
+
+  /// Held (locked) by the one running GUI - see `GuiInstanceLock`.
+  String get guiLockFile => p.join(logsDir, 'gui.lock');
+
+  /// The running GUI's PID, so a second launch can focus its window.
+  String get guiPidFile => p.join(logsDir, 'gui.pid');
+
+  /// Present while the user has Power on (written by Power ON, removed by
+  /// Power OFF, app close and every app launch). The GUI's engine watchdog
+  /// restarts a dead engine only while this exists - same role as
+  /// tradingMT5's "Power on" state.
+  String get powerOnFile => p.join(logsDir, 'power-on');
 
   String get configFile => p.join(rootDir, 'config.json');
   String get envFile => p.join(rootDir, '.env');
@@ -274,20 +286,6 @@ class CoreStorage {
   /// muted; a trigger missing from the file defaults to unmuted.
   String get soundSettingsFile => p.join(logsDir, 'sound-settings.json');
 
-  /// Piper neural TTS install (2026-09-17, per the user - replaced
-  /// espeak-ng/spd-say for a genuinely natural-sounding voice instead of a
-  /// formant-synthesizer "robotic" one). A manual, one-time install under
-  /// the app's own runtime dir (NOT bundled as a Flutter asset - it's the
-  /// binary plus its shared libs plus a ~60MB voice model, no reason to
-  /// bloat the app bundle with it) - `piper_linux_x86_64.tar.gz` from
-  /// rhasspy/piper's GitHub releases, extracted here alongside the
-  /// `en_US-amy-medium` voice model from rhasspy/piper-voices on Hugging
-  /// Face. GUI-only; the engine never speaks.
-  String get piperDir => p.join(rootDir, 'piper');
-  String get piperBinary => p.join(piperDir, 'piper');
-  String get piperVoiceModel => p.join(piperDir, 'en_US-amy-medium.onnx');
-  String get piperVoiceConfig =>
-      p.join(piperDir, 'en_US-amy-medium.onnx.json');
 
   String get brainDir => p.join(rootDir, 'brain');
   String get brainIndexFile => p.join(brainDir, 'BRAIN.md');
@@ -470,12 +468,4 @@ class CoreStorage {
     return out;
   }
 
-  String expandHome(String path) {
-    if (!path.startsWith('~')) return path;
-    final home =
-        Platform.environment['HOME'] ??
-        Platform.environment['USERPROFILE'] ??
-        '';
-    return p.join(home, path.substring(1).replaceFirst(RegExp(r'^/'), ''));
-  }
 }

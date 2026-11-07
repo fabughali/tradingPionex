@@ -75,32 +75,11 @@ class IntegrationsRepository {
   // ----------------------------------------------------------- TradingView
   CdpConfig readCdpConfig() => loadOrInitConfig(_storage).cdp;
 
-  /// Toggles [AppConfig.remoteSession] - see its own doc comment for why
-  /// this is a manual setting rather than something auto-detected.
-  void saveRemoteSession(bool remoteSession) {
-    final config = loadOrInitConfig(_storage);
-    final updated = AppConfig(
-      pollIntervalSec: config.pollIntervalSec,
-      autoReserve: config.autoReserve,
-      remoteSession: remoteSession,
-      cdp: config.cdp,
-      gridPairs: config.gridPairs,
-      technique: config.technique,
-      risk: config.risk,
-      heartbeatAlertEveryMin: config.heartbeatAlertEveryMin,
-    );
-    _storage.writeString(
-      _storage.configFile,
-      '${const JsonEncoder.withIndent('  ').convert(updated.toJson())}\n',
-    );
-  }
-
   void saveCdpConfig({required String host, required int port}) {
     final config = loadOrInitConfig(_storage);
     final updated = AppConfig(
       pollIntervalSec: config.pollIntervalSec,
       autoReserve: config.autoReserve,
-      remoteSession: config.remoteSession,
       cdp: CdpConfig(host: host, port: port),
       gridPairs: config.gridPairs,
       technique: config.technique,
@@ -113,63 +92,22 @@ class IntegrationsRepository {
     );
   }
 
-  /// Mirrors the auto-launch the engine already does in its own `_connect()`
-  /// (lib/data/engine/engine_service.dart) — if TradingView Desktop isn't
-  /// reachable, power it up with the debug port open instead of just
-  /// reporting failure, so this button recovers from "TradingView wasn't
-  /// running" (e.g. after a machine restart) on its own.
+  /// Checks TradingView Desktop's debug port. Never launches or kills it:
+  /// it's shared with tradingMT5 (see launch.dart).
   Future<ConnectionTestResult> testTradingView({
     required String host,
     required int port,
   }) async {
-    if (await isCdpUp(host, port)) {
-      return ConnectionTestResult(
-        ok: true,
-        message: 'TradingView Desktop is reachable on $host:$port.',
-      );
-    }
-    final home = _storage.expandHome('~');
-    final launched = await launchTradingView(
-      host,
-      port,
-      LaunchConfig.defaultForHome(home.isNotEmpty ? home : _storage.rootDir),
-      remoteSession: loadOrInitConfig(_storage).remoteSession,
-    );
+    final up = await isCdpUp(host, port);
     return ConnectionTestResult(
-      ok: launched,
-      message: launched
-          ? 'TradingView Desktop wasn\'t running — launched it and confirmed $host:$port is reachable.'
-          : 'TradingView Desktop wasn\'t running and couldn\'t be launched automatically — start it manually with --remote-debugging-port=$port.',
+      ok: up,
+      message: up
+          ? 'TradingView Desktop is reachable on $host:$port.'
+          : 'TradingView Desktop is not reachable on $host:$port — open it with --remote-debugging-port=$port.',
     );
   }
 
-  /// Read-only status check for the Settings screen's power toggle — unlike
-  /// [testTradingView], never launches or kills anything.
+  /// Read-only status check — never launches or kills anything.
   Future<bool> isTradingViewUp({required String host, required int port}) =>
       isCdpUp(host, port);
-
-  Future<ConnectionTestResult> powerOffTradingView({
-    required String host,
-    required int port,
-  }) async {
-    if (!canControlTradingView) {
-      return ConnectionTestResult(
-        ok: false,
-        message:
-            'This app doesn\'t power off TradingView Desktop on Windows — close it yourself.',
-      );
-    }
-    final home = _storage.expandHome('~');
-    final stopped = await stopTradingView(
-      host,
-      port,
-      LaunchConfig.defaultForHome(home.isNotEmpty ? home : _storage.rootDir),
-    );
-    return ConnectionTestResult(
-      ok: stopped,
-      message: stopped
-          ? 'TradingView Desktop powered off.'
-          : 'Could not confirm TradingView Desktop powered off — it may still be shutting down.',
-    );
-  }
 }

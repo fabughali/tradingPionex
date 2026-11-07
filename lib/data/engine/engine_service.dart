@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io' show InternetAddress, Process;
+import 'dart:io' show InternetAddress;
 
 import '../../core/core_api.dart';
 import '../../core/core_constants.dart';
@@ -22,6 +22,8 @@ import '../logging/app_logger.dart';
 import '../models/app_config.dart';
 import '../models/bot_history_entry.dart';
 import '../models/trade_start_event.dart';
+import '../models/signal.dart';
+import '../models/trade_direction.dart';
 import '../models/engine_status.dart';
 import '../models/grid_bot.dart';
 import '../models/liquidation_levels.dart';
@@ -35,7 +37,9 @@ import 'tp_sl_ladder.dart';
 import '../technique/grid_count.dart';
 import '../technique/liquidation.dart';
 import '../technique/shrink_retry.dart';
+import '../technique/candle_closed.dart';
 import '../technique/worm10_decision.dart';
+import '../technique/worm10_pionex.dart';
 import '../technique/zigzag_range.dart';
 import '../tradingview/cdp_client.dart';
 import '../tradingview/chart_state.dart';
@@ -812,8 +816,8 @@ class EngineService {
     var restored = 0;
     Worm10Event? eventOf(Map? json) {
       if (json == null) return null;
-      Worm10EventType? type;
-      for (final t in Worm10EventType.values) {
+      Worm10EventKind? type;
+      for (final t in Worm10EventKind.values) {
         if (t.name == json['type']) {
           type = t;
           break;
@@ -821,7 +825,7 @@ class EngineService {
       }
       final time = (json['time'] as num?)?.toInt();
       if (type == null || time == null) return null;
-      return Worm10Event(type: type, time: time);
+      return Worm10Event(kind: type, time: time);
     }
 
     for (final entry in data.entries) {
@@ -852,7 +856,7 @@ class EngineService {
       data.remove(entryKey);
     } else {
       data[entryKey] = {
-        'pending': {'type': pending.type.name, 'time': pending.time},
+        'pending': {'type': pending.kind.name, 'time': pending.time},
       };
     }
     storage.writeJson(storage.worm10GateFile, data);
@@ -3135,7 +3139,7 @@ class EngineService {
               'type': 'worm10-check',
               'pair': symbol,
               'category': category.wireValue,
-              'eventType': confirmedEvent.type.name,
+              'eventType': confirmedEvent.kind.name,
               'eventTime': confirmedEvent.time,
             });
           }
@@ -3951,7 +3955,7 @@ class EngineService {
       logger.log('NO DATA $symbol[${category.label}]: $msg');
       return {'symbolVerified': true, 'message': "$symbol's $msg"};
     }
-    final direction = worm10EventDirection(event.type) == Worm10Direction.buy
+    final direction = worm10EventDirection(event.kind) == TradeDirection.long
         ? GridDirection.long
         : GridDirection.short;
     final lines = await _readZigzagLines(
@@ -4723,43 +4727,20 @@ class EngineService {
       logger.log('CDP client was dead/timeout - reconnecting fresh.');
       _cdp = null;
     }
-    final up = await isCdpUp(config.cdp.host, config.cdp.port);
-    if (!up && !canControlTradingView) {
+    // TradingView is shared with tradingMT5, so this app never launches or
+    // kills it (see launch.dart) - it only reports that it needs opening.
+    if (!await isCdpUp(config.cdp.host, config.cdp.port)) {
       logger.log(
         'CDP unavailable: TradingView is not reachable on '
-        '${config.cdp.host}:${config.cdp.port}. Open it manually with '
+        '${config.cdp.host}:${config.cdp.port}. Open TradingView Desktop with '
         '--remote-debugging-port=${config.cdp.port}.',
         level: 'CRITICAL',
       );
       _writeStatus(
-        message: 'TradingView not open — open it manually',
+        message: 'TradingView not open — open it, then this reconnects by itself',
         busy: false,
       );
       return null;
-    }
-    if (!up) {
-      logger.log('TradingView not running - launching it now.');
-      _writeStatus(
-        message: 'TradingView not open — launching it...',
-        busy: true,
-      );
-      final home = storage
-          .rootDir; // TRADING_PIONEX_HOME or $HOME, used for the launch env below
-      final launched = await launchTradingView(
-        config.cdp.host,
-        config.cdp.port,
-        LaunchConfig.defaultForHome(
-          storage.expandHome('~').isNotEmpty ? storage.expandHome('~') : home,
-        ),
-        remoteSession: config.remoteSession,
-      );
-      if (!launched) {
-        logger.log(
-          'CDP unavailable: TradingView did not come up after launch attempt.',
-        );
-        return null;
-      }
-      logger.log('TradingView launched and CDP is up.');
     }
     try {
       _writeStatus(message: 'Connecting to chart...', busy: true);
@@ -4828,33 +4809,14 @@ class EngineService {
       }
       return;
     }
-    if (!canControlTradingView) {
-      logger.log(
-        'TRADINGVIEW WATCHDOG: CDP port reachable but the chart never '
-        'cooperated $_forceRelaunchTradingViewThreshold times in a row - '
-        'TradingView looks stuck. Not killing it on this platform: restart '
-        'it manually.',
-        level: 'CRITICAL',
-      );
-      return;
-    }
+    // Never kill TradingView: it's shared with tradingMT5's tab.
     logger.log(
       'TRADINGVIEW WATCHDOG: CDP port reachable but the chart never '
-      'cooperated $_forceRelaunchTradingViewThreshold times in a row - '
-      'TradingView looks alive but stuck, not genuinely down (which the '
-      'normal launch path already handles). Force-killing it now so the '
-      'next connect attempt starts it fresh.',
+      'cooperated $_forceRelaunchTradingViewThreshold times in a row, even '
+      'after reloading this app\'s own tab - TradingView looks stuck. Not '
+      'killing it (shared with tradingMT5): restart it by hand.',
       level: 'CRITICAL',
     );
-    try {
-      final home = storage.rootDir;
-      final config0 = LaunchConfig.defaultForHome(
-        storage.expandHome('~').isNotEmpty ? storage.expandHome('~') : home,
-      );
-      await Process.run('pkill', ['-9', '-f', config0.binaryPath]);
-    } catch (e) {
-      logger.log('TRADINGVIEW WATCHDOG: force-kill failed: $e');
-    }
   }
 
   /// [reportStatus] controls whether the routine "Verifying chart
@@ -4982,11 +4944,11 @@ class EngineService {
   }) async {
     final check = await _readWorm10Chart(symbol, resolution);
     if (check == null) return (event: null, latestBarTime: null);
-    final events = deriveWorm10Events(check.bars);
+    final events = deriveWorm10Events(check);
     final candidate = events.isEmpty ? null : events.last;
     logger.log(
       'CHECKUP $symbol $resolution: ${events.length} event(s) derived, latest='
-      '${candidate == null ? 'none' : '${candidate.type.name}@${candidate.time}'}',
+      '${candidate == null ? 'none' : '${candidate.kind.name}@${candidate.time}'}',
     );
     if (candidate == null ||
         !await _worm10TripleConfirmed(symbol, resolution, candidate)) {
@@ -5025,7 +4987,7 @@ class EngineService {
     logger.log(
       'INDICATOR WAIT $symbol $resolution: waiting up to ${budgetSec}s for the latest bar to load.',
     );
-    Future<Worm10Check> read(String label) => readWorm10Bars(
+    Future<Worm10Check> read(String label) => readWorm10Signals(
       _cdp!,
       symbol,
       customScripts[0].scriptIdPart,
@@ -5064,21 +5026,32 @@ class EngineService {
       await Future<void>.delayed(const Duration(milliseconds: 1500));
     }
 
+    // tradingMT5's settle rule, unchanged: after a switch the plot data can be
+    // empty or still the old symbol's for a few seconds. Stable only when two
+    // reads agree on the last zigzag signal (time + tag); an empty read is
+    // never stable.
     if (switched.switched) {
       var stable = false;
-      for (var attempt = 0; attempt < 6; attempt++) {
+      const settleAttempts = 10;
+      for (var attempt = 0; attempt < settleAttempts; attempt++) {
         await Future<void>.delayed(const Duration(seconds: 2));
         final recheck = await read('settle');
-        final agree =
-            _lastSwingMark(result.bars) == _lastSwingMark(recheck.bars);
+        final prevLast = result.zigzag.signals.isEmpty ? null : result.zigzag.signals.last;
+        final nextLast = recheck.zigzag.signals.isEmpty ? null : recheck.zigzag.signals.last;
+        final agree = nextLast != null &&
+            prevLast?.time == nextLast.time &&
+            prevLast?.tag == nextLast.tag;
         result = recheck;
         if (agree) {
           stable = true;
           break;
         }
         logger.log(
-          'WORM10 SETTLE $symbol $resolution: signal data still settling after '
-          'the symbol switch (attempt ${attempt + 1}/6) - retrying.',
+          nextLast == null
+              ? 'WORM10 SETTLE $symbol $resolution: indicator data not calculated yet '
+                    'after the symbol switch (attempt ${attempt + 1}/$settleAttempts) - waiting.'
+              : 'WORM10 SETTLE $symbol $resolution: signal data still settling after '
+                    'the symbol switch (attempt ${attempt + 1}/$settleAttempts) - retrying.',
         );
       }
       if (!stable) {
@@ -5094,20 +5067,6 @@ class EngineService {
     return result;
   }
 
-  /// The newest bar carrying an HH/LL/BUY/SELL print, as a comparable value -
-  /// what must stop changing for a chart's plot data to count as settled.
-  (int, bool, bool, bool, bool)? _lastSwingMark(List<Worm10Bar> bars) {
-    (int, bool, bool, bool, bool)? mark;
-    var newest = -1;
-    for (final b in bars) {
-      if (b.time > newest && (b.hh || b.ll || b.zigzagBuy || b.zigzagSell)) {
-        newest = b.time;
-        mark = (b.time, b.hh, b.ll, b.zigzagBuy, b.zigzagSell);
-      }
-    }
-    return mark;
-  }
-
   /// "1 million sure" rule (2026-09-27, per the user's own standing rule):
   /// three total reads, 10 seconds apart, must agree on type AND bar time, or
   /// the cycle is skipped (no trade, no close) and retried fresh next cycle.
@@ -5119,7 +5078,7 @@ class EngineService {
   ) async {
     for (var confirmAttempt = 1; confirmAttempt <= 2; confirmAttempt++) {
       await Future<void>.delayed(const Duration(seconds: 10));
-      final confirm = await readWorm10Bars(
+      final confirm = await readWorm10Signals(
         _cdp!,
         symbol,
         customScripts[0].scriptIdPart,
@@ -5127,13 +5086,13 @@ class EngineService {
         onDebugError: (msg) =>
             logger.log('WORM10 DEBUG (confirm) $symbol $resolution: $msg'),
       );
-      final confirmEvents = deriveWorm10Events(confirm.bars);
+      final confirmEvents = deriveWorm10Events(confirm);
       final confirmLatest = confirmEvents.isEmpty ? null : confirmEvents.last;
       if (confirmLatest != first) {
         logger.log(
           'WORM10 FLICKER $symbol $resolution: read #1 '
-          '${first.type.name}@${first.time}, read #${confirmAttempt + 1} '
-          '${confirmLatest == null ? 'nothing' : '${confirmLatest.type.name}@${confirmLatest.time}'} '
+          '${first.kind.name}@${first.time}, read #${confirmAttempt + 1} '
+          '${confirmLatest == null ? 'nothing' : '${confirmLatest.kind.name}@${confirmLatest.time}'} '
           '- disagreement, treating as unconfirmed this cycle.',
           level: 'WARNING',
         );
@@ -5185,16 +5144,16 @@ class EngineService {
 
     var check = await _readWorm10Chart(symbol, resolution);
     if (check == null) return null;
-    var events = deriveWorm10Events(check.bars);
+    var events = deriveWorm10Events(check);
     for (var i = 0; i < 2 && events.isEmpty && immediate; i++) {
       await Future<void>.delayed(const Duration(seconds: 5));
       check = await _readWorm10Chart(symbol, resolution);
       if (check == null) return null;
-      events = deriveWorm10Events(check.bars);
+      events = deriveWorm10Events(check);
     }
     logger.log(
       'CHECKUP $symbol $resolution: ${events.length} event(s) derived, latest='
-      '${events.isEmpty ? 'none' : '${events.last.type.name}@${events.last.time}'}',
+      '${events.isEmpty ? 'none' : '${events.last.kind.name}@${events.last.time}'}',
     );
     if (events.isEmpty) return null;
     final latest = events.last;
@@ -5208,7 +5167,7 @@ class EngineService {
       actNow = isCandleClosed(latest.time, period, DateTime.now());
       if (!actNow) {
         logger.log(
-          'WORM10 $entryKey: ${latest.type.name}@${latest.time} is on the '
+          'WORM10 $entryKey: ${latest.kind.name}@${latest.time} is on the '
           'still-forming candle - not acting immediately, it takes the normal '
           'wait instead.',
         );
@@ -5218,7 +5177,7 @@ class EngineService {
       _worm10Pending[entryKey] = latest;
       _persistWorm10Pending(entryKey, latest);
       logger.log(
-        'WORM10 PENDING $entryKey: ${latest.type.name}@${latest.time} triple-confirmed - '
+        'WORM10 PENDING $entryKey: ${latest.kind.name}@${latest.time} triple-confirmed - '
         'waiting for its own candle plus one more full candle to close.',
       );
       return null;
@@ -5231,7 +5190,7 @@ class EngineService {
       return null;
     }
     logger.log(
-      'WORM10 CONFIRMED $entryKey: ${latest.type.name}@${latest.time} - '
+      'WORM10 CONFIRMED $entryKey: ${latest.kind.name}@${latest.time} - '
       '${actNow ? 'closed candle, acting immediately' : 'now actionable'}.',
     );
     return latest;
@@ -5307,19 +5266,19 @@ class EngineService {
     final id = existing.buOrderId;
 
     Future<List<Worm10Event>> reread(String label) async => deriveWorm10Events(
-      (await readWorm10Bars(
+      (await readWorm10Signals(
         _cdp!,
         symbol,
         customScripts[0].scriptIdPart,
         customScripts[1].scriptIdPart,
         onDebugError: (msg) =>
             logger.log('WORM10 AUDIT ($label) $symbol: $msg'),
-      )).bars,
+      )),
     );
     Worm10Event? latestOpen1(List<Worm10Event> list) {
       for (final e in list.reversed) {
-        if (e.type == Worm10EventType.buyOpen1 ||
-            e.type == Worm10EventType.sellOpen1) {
+        if (e.kind == Worm10EventKind.buyOpen1 ||
+            e.kind == Worm10EventKind.sellOpen1) {
           return e;
         }
       }
@@ -5350,27 +5309,29 @@ class EngineService {
     }
     _worm10AuditedBots.add(id);
 
-    var trueDirection = worm10EventDirection(start.type) == Worm10Direction.buy
-        ? GridDirection.long
-        : GridDirection.short;
-    var trueStart = start;
-    for (final e in auditEvents.where((e) => e.time > start!.time)) {
-      final decision = worm10DecisionFor(
-        trueDirection == GridDirection.long
-            ? Worm10Running.buy
-            : Worm10Running.sell,
-        e.type,
-      );
-      if (decision.action == Worm10Action.recycle) {
-        trueStart = e;
-      } else if (decision.action == Worm10Action.flip) {
-        trueDirection = decision.direction == Worm10Direction.buy
-            ? GridDirection.long
-            : GridDirection.short;
-        trueStart = e;
+    // tradingMT5's replay, unchanged: start from the latest case-1 event,
+    // then walk every later event in time order through worm10DecisionFor.
+    final startEvent = start;
+    var trueDir = worm10DecisionFor(null, startEvent.kind).resultDirection!;
+    var trueStart = startEvent;
+    final afterStart = auditEvents.where((e) => e.time > startEvent.time).toList()
+      ..sort((a, b) => a.time.compareTo(b.time));
+    for (final e in afterStart) {
+      final decision = worm10DecisionFor(trueDir, e.kind);
+      switch (decision.action) {
+        case Worm10Action.none:
+        case Worm10Action.update:
+          break;
+        case Worm10Action.recycle:
+          trueStart = e;
+        case Worm10Action.flip:
+        case Worm10Action.openFresh:
+          trueDir = decision.resultDirection!;
+          trueStart = e;
       }
     }
-    final verdict = '${trueStart.type.name}@${trueStart.time}';
+    final trueDirection = gridDirectionOf(trueDir);
+    final verdict = '${trueStart.kind.name}@${trueStart.time}';
 
     if (trueDirection == runningDirection) {
       // Nothing to trade on. The record of what opened the bot is pure
@@ -5395,7 +5356,7 @@ class EngineService {
         return false;
       }
       _openEntryByPair[entryKey] = entry.copyWith(
-        openEventType: trueStart.type,
+        openEventType: trueStart.kind,
         openEventTime: trueStart.time,
       );
       logger.log(
@@ -6743,10 +6704,10 @@ class EngineService {
       skipCooldown: true,
     );
     if (confirmedEvent == null) return;
-    final eventDirection = worm10EventDirection(confirmedEvent.type);
+    final eventDirection = worm10EventDirection(confirmedEvent.kind);
     final isReversal = switch (bot.trend) {
-      GridDirection.long => eventDirection == Worm10Direction.sell,
-      GridDirection.short => eventDirection == Worm10Direction.buy,
+      GridDirection.long => eventDirection == TradeDirection.short,
+      GridDirection.short => eventDirection == TradeDirection.long,
       null => false,
     };
     if (!isReversal) return;
@@ -6754,7 +6715,7 @@ class EngineService {
     await _lockStopLossLockValue(
       bot,
       pct - 10,
-      'P&L=${pct.toStringAsFixed(1)}% reversal event (${confirmedEvent.type.name})',
+      'P&L=${pct.toStringAsFixed(1)}% reversal event (${confirmedEvent.kind.name})',
     );
   }
 
@@ -6953,7 +6914,7 @@ class EngineService {
     final key = _gridKey(base);
     final entryKey = '$key|${category.wireValue}';
     if (!_shouldAnnounceSignal(entryKey, confirmedEvent.time)) return;
-    final direction = worm10EventDirection(confirmedEvent.type) == Worm10Direction.buy
+    final direction = worm10EventDirection(confirmedEvent.kind) == TradeDirection.long
         ? GridDirection.long
         : GridDirection.short;
     final existing = _appGridForKey(key, category);
@@ -7275,10 +7236,10 @@ class EngineService {
     // --- Close on recycle/flip (Worm10 decision table) ---------------------
     final entry = _openEntryByPair[entryKey];
     if (existing != null && entry != null && confirmedEvent != null) {
-      final running = entry.direction == GridDirection.long
-          ? Worm10Running.buy
-          : Worm10Running.sell;
-      final decision = worm10DecisionFor(running, confirmedEvent.type);
+      final decision = worm10DecisionFor(
+        tradeDirectionOf(entry.direction),
+        confirmedEvent.kind,
+      );
       // §4 of the user's spec: ignore a recycle/flip if it's literally the
       // SAME event (type+time) that opened the current trade - otherwise
       // the latest event, re-read every cycle until something newer prints,
@@ -7508,7 +7469,7 @@ class EngineService {
             });
             brain.appendExperience(
               'Closed ${entry.direction.wireValue} futures grid on $symbol on '
-              'Worm10 ${decision.action.name} (${flip.type.name}@${flip.time}) at $exitPrice',
+              'Worm10 ${decision.action.name} (${flip.kind.name}@${flip.time}) at $exitPrice',
             );
             // Entry-signal record: this is the ONE close path with a real
             // confirmed event on hand (2026-09-26, per the user - see
@@ -7526,7 +7487,7 @@ class EngineService {
               // notice/process it, seconds or minutes after the signal
               // actually appeared on the chart.
               at: DateTime.fromMillisecondsSinceEpoch(flip.time * 1000),
-              type: flip.type.name,
+              type: flip.kind.name,
               zone: null,
               value: null,
             );
@@ -7551,7 +7512,7 @@ class EngineService {
                 ),
                 endTime: DateTime.now(),
                 detail: _withTerminationContext(
-                  'Closed automatically on Worm10 ${decision.action.name} (${flip.type.name}).',
+                  'Closed automatically on Worm10 ${decision.action.name} (${flip.kind.name}).',
                   base,
                   category,
                   realizedProfit: pnl,
@@ -7584,7 +7545,7 @@ class EngineService {
             tradingPaused: tradingPaused,
             category: category,
             bypassFreshSignalGate: true,
-            forcedDirection: decision.direction == Worm10Direction.buy
+            forcedDirection: decision.resultDirection == TradeDirection.long
                 ? GridDirection.long
                 : GridDirection.short,
           );
@@ -7603,7 +7564,7 @@ class EngineService {
         base: base,
         buOrderId: existing.buOrderId,
         botDirection: existing.trend ?? GridDirection.long,
-        latestEventType: confirmedEvent?.type,
+        latestEventType: confirmedEvent?.kind,
       );
       _runningBotsReportEntries.add(runningEntry);
       _mergeRunningBotsEntry(runningEntry);
@@ -7649,42 +7610,35 @@ class EngineService {
       return;
     }
 
-    Worm10Direction openDirection;
-    if (bypassFreshSignalGate) {
-      // Ignite/SL re-ignite (§8 of the user's spec): allowed to open on a
-      // bare zigzag event too, not just a real OPEN1 - `worm10DecisionFor`
-      // would refuse a bare zigzag with no running trade, so this reads
-      // the event's own raw direction instead of going through the full
-      // decision table. Still the GATE's own confirmed output, never a
-      // raw unconfirmed read - the closed-candle rule still applies.
-      openDirection = worm10EventDirection(confirmedEvent.type);
+    // tradingMT5's open-from-flat rule, unchanged: only a case-1 event opens a
+    // flat pair; an ignited pair (Ignite / SL re-ignite) also opens on a bare
+    // zigzag, in that event's direction (worm10DecisionWithIgnite).
+    final openDecision = worm10DecisionWithIgnite(
+      null,
+      confirmedEvent.kind,
+      ignited: bypassFreshSignalGate,
+    );
+    if (openDecision.action != Worm10Action.openFresh) {
       logger.log(
-        'IGNITE $symbol[${category.label}]: opening on confirmed '
-        '${confirmedEvent.type.name}@${confirmedEvent.time} (bare zigzag allowed).',
+        'SKIP $symbol[${category.label}]: confirmed event '
+        '${confirmedEvent.kind.name}@${confirmedEvent.time} does not open '
+        '(no running trade yet - a bare zigzag never opens on its own).',
       );
-    } else {
-      final openDecision = worm10DecisionFor(Worm10Running.none, confirmedEvent.type);
-      if (openDecision.action != Worm10Action.open ||
-          openDecision.direction == null) {
-        logger.log(
-          'SKIP $symbol[${category.label}]: confirmed event '
-          '${confirmedEvent.type.name}@${confirmedEvent.time} does not open '
-          '(no running trade yet - a bare zigzag never opens on its own).',
-        );
-        return;
-      }
-      openDirection = openDecision.direction!;
+      return;
+    }
+    if (bypassFreshSignalGate) {
+      logger.log(
+        'IGNITE $symbol[${category.label}]: opening on the current signal '
+        '${confirmedEvent.kind.name}@${confirmedEvent.time}.',
+      );
     }
     final direction =
-        forcedDirection ??
-        (openDirection == Worm10Direction.buy
-            ? GridDirection.long
-            : GridDirection.short);
+        forcedDirection ?? gridDirectionOf(openDecision.resultDirection!);
 
     final already = _openEntryByPair[entryKey];
     if (already != null &&
         already.entryTime == confirmedEvent.time &&
-        already.openEventType == confirmedEvent.type &&
+        already.openEventType == confirmedEvent.kind &&
         already.direction == direction)
       return;
 
@@ -7981,7 +7935,7 @@ class EngineService {
     logger.log(
       'TP/SL $symbol: ${direction.wireValue} entry=$trigger grid range [${range.bottom}..${range.top}] '
       'stable=${lvl.stable} -> TP=${lvl.takeProfitPrice} SL=${lvl.stopLossPrice} '
-      '(event: ${confirmedEvent.type.name}@${confirmedEvent.time} / $eventCandleUtc)',
+      '(event: ${confirmedEvent.kind.name}@${confirmedEvent.time} / $eventCandleUtc)',
     );
 
     int row;
@@ -8311,7 +8265,7 @@ class EngineService {
         entryTime: confirmedEvent.time,
         entryPrice: trigger,
         investment: investment,
-        openEventType: confirmedEvent.type,
+        openEventType: confirmedEvent.kind,
       );
       return;
     }
@@ -8424,7 +8378,7 @@ class EngineService {
         });
         brain.appendExperience(
           'Opened ${direction.wireValue} futures grid on $symbol: top=${range.top} bottom=${range.bottom} '
-          'row=$row lev=${leverage}x invest=$investment entryEvent=${confirmedEvent.type.name}@${confirmedEvent.time}',
+          'row=$row lev=${leverage}x invest=$investment entryEvent=${confirmedEvent.kind.name}@${confirmedEvent.time}',
         );
         final newBuOrderId =
             (result['buOrderId'] ??
@@ -8443,7 +8397,7 @@ class EngineService {
           entryPrice: trigger,
           investment: investment,
           buOrderId: newBuOrderId,
-          openEventType: confirmedEvent.type,
+          openEventType: confirmedEvent.kind,
         );
         // Entry-signal record (2026-09-26, per the user: "the record should
         // be one out of those 60 entries") - `zone`/`value` stay
@@ -8457,7 +8411,7 @@ class EngineService {
           // TradingView's own bar time, not wall-clock - see the matching
           // comment on `entrySignalStore.recordClose` above.
           at: DateTime.fromMillisecondsSinceEpoch(confirmedEvent.time * 1000),
-          type: confirmedEvent.type.name,
+          type: confirmedEvent.kind.name,
           zone: null,
           value: null,
         );
@@ -8542,7 +8496,7 @@ class EngineService {
           base: base,
           buOrderId: newBuOrderId,
           botDirection: direction,
-          latestEventType: confirmedEvent.type,
+          latestEventType: confirmedEvent.kind,
         );
         _runningBotsReportEntries.add(runningEntry);
         _mergeRunningBotsEntry(runningEntry);

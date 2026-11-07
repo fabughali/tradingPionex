@@ -1,250 +1,288 @@
-/// Worm10 Hybrid Decision technique (2026-10-25, per the user) — pure,
-/// zero-I/O event derivation from raw per-bar worm_10_26/spy_9_26 data.
-/// Implemented natively against this codebase (not ported) from the
-/// user's own plain-language spec, confirmed live via CDP against the
-/// real chart before any of this was written — see
-/// `lib/data/tradingview/signals_reader.dart`'s `readWorm10Bars` for the
-/// CDP-reading half this feeds from. Replaces the worm_9_26 technique
-/// entirely, per the user: "and remove any old technique from code and
-/// from prd."
+import '../models/signal.dart';
+import '../models/trade_direction.dart';
 
-/// One raw bar's worth of worm_10_26/spy_9_26 plot data. `rsiZone` is one
-/// of 'blue'/'purple'/'white'/'green'/'yellow', or null if spy_9_26 had no
-/// reading for this bar time.
-class Worm10Bar {
-  const Worm10Bar({
-    required this.time,
-    required this.hh,
-    required this.ll,
-    required this.zigzagBuy,
-    required this.zigzagSell,
-    required this.stBuy,
-    required this.stSell,
-    required this.rsiZone,
-  });
-
-  final int time;
-  final bool hh;
-  final bool ll;
-  final bool zigzagBuy;
-  final bool zigzagSell;
-  final bool stBuy;
-  final bool stSell;
-  final String? rsiZone;
-}
-
-enum Worm10EventType { buyOpen1, sellOpen1, zigzagBuy, zigzagSell }
-
-class Worm10Event {
-  const Worm10Event({required this.type, required this.time});
-  final Worm10EventType type;
-  final int time;
-
-  @override
-  bool operator ==(Object other) =>
-      other is Worm10Event && other.type == type && other.time == time;
-
-  @override
-  int get hashCode => Object.hash(type, time);
-
-  @override
-  String toString() => '${type.name}@$time';
-}
-
-/// Derives the full event stream from raw bars, per the user's exact spec:
+/// The third decision technique (worm_10_26 + spy_9_26, Heikin Ashi) - pure
+/// decision logic, deliberately isolated from [EngineService] so it can be
+/// dry-run verified against real historical signal data before ever being
+/// wired into a live open/close call. 2026-10-14, per the user, after
+/// extensive back-and-forth to pin down the exact spec against real
+/// worm_10_26 plot data (see PRD §9.x for the full worked-example trail -
+/// multiple earlier guesses were wrong and explicitly corrected).
 ///
-/// - OPEN1 confluence (§3a): SELL_OPEN1 requires HH on that bar AND the
-///   Supertrend state is `buy` AND the RSI zone is green/yellow;
-///   BUY_OPEN1 is the mirror (LL, state `sell`, zone blue/purple). Any HH/LL
-///   where the other two conditions don't hold is "ignored completely" -
-///   never even considered, not treated as a weaker signal.
-/// - Supertrend *state* (not just the discrete tick): the most recent
-///   `stBuy`/`stSell` at or before each bar, carried forward - a same-bar
-///   tick counts for that same bar's own confluence check.
-/// - Swing dedup (§3, "removing duplicates"): two neighbouring OPEN1 events
-///   of the same kind are one swing if the confluence held on every bar
-///   between them - only the LAST survives. If the confluence breaks (RSI
-///   leaves the zone, or Supertrend flips), or a different event falls
-///   between them, they stay separate.
-/// - Zigzag (§3b): bare `BUY`/`SELL`, no RSI/Supertrend check at all - only
-///   the first of neighbouring same-kind events is kept, even across a gap,
-///   since nothing else happened in between.
+/// The four distinct event kinds checked each cycle. Each implies both a
+/// direction and an action class:
 ///
-/// Bars are sorted by time first; the input order doesn't matter. The
-/// returned list is sorted by time ascending.
-List<Worm10Event> deriveWorm10Events(List<Worm10Bar> bars) {
-  final sorted = [...bars]..sort((a, b) => a.time.compareTo(b.time));
+/// - [buyOpen1]/[sellOpen1] ("case 1", full confluence: HH/LL + RSI +
+///   Supertrend, ALL three required - 2026-10-17, per the user's exact
+///   spec: step 1 find LL/HH, step 2 Supertrend must agree (LL->sell,
+///   HH->buy), step 3 RSI must agree (LL->blue/purple, HH->green/yellow);
+///   if any step fails the signal is not a reference at all and is
+///   IGNORED completely, not treated as a weaker close trigger - an
+///   earlier "weak" [buyClose1]/[sellClose1] variant that fired on
+///   HH/LL+RSI alone, without the Supertrend leg, was wrong and has been
+///   removed: it caused spurious closes whenever Supertrend hadn't
+///   actually flipped, confirmed live against the user's own chart on
+///   2026-10-17): opens from flat; RECYCLES (close+reopen) the SAME
+///   direction if it's already running ("if current trade is buy and new
+///   buy open case 1 appears ... app close this trade and start buy
+///   again" - confirmed directly with the user); FLIPS (closes the
+///   opposite + opens this one) if the opposite direction is running.
+/// - [zigzagBuy]/[zigzagSell] ("case 3", the bare all-caps BUY/SELL plot -
+///   same heritage as worm_9_26, confirmed NOT the mixed-case discrete
+///   Supertrend plot, and never RSI/Supertrend gated): FLIPS the opposite
+///   direction if it's running; is just an Update (log only, no state
+///   change) if the SAME direction is already running; no-op from flat (a
+///   bare signal alone never opens a fresh trade - only case 1 can).
+///
+/// "Case 2" (both open and close) is never checked as an independent
+/// condition - it's the automatic CONSEQUENCE of a flip above ("a SELL
+/// trade closing" IS what opens the BUY, not a separate thing to verify).
+enum Worm10EventKind { buyOpen1, sellOpen1, zigzagBuy, zigzagSell }
 
-  // Supertrend's state as of each bar: the latest discrete tick at or before
-  // it, carried forward. Recorded per bar so the swing check below can look
-  // back at any bar in between two events.
-  final stIsBuyAt = <int, bool?>{};
-  bool? stIsBuy;
-  for (final bar in sorted) {
-    if (bar.stBuy) stIsBuy = true;
-    if (bar.stSell) stIsBuy = false;
-    stIsBuyAt[bar.time] = stIsBuy;
+Worm10EventKind worm10EventKindFromWire(String s) => switch (s) {
+  'BUY_OPEN1' => Worm10EventKind.buyOpen1,
+  'SELL_OPEN1' => Worm10EventKind.sellOpen1,
+  'ZIGZAG_BUY' => Worm10EventKind.zigzagBuy,
+  'ZIGZAG_SELL' => Worm10EventKind.zigzagSell,
+  _ => throw ArgumentError('unknown worm10 event kind: $s'),
+};
+
+String worm10EventKindToWire(Worm10EventKind k) => switch (k) {
+  Worm10EventKind.buyOpen1 => 'BUY_OPEN1',
+  Worm10EventKind.sellOpen1 => 'SELL_OPEN1',
+  Worm10EventKind.zigzagBuy => 'ZIGZAG_BUY',
+  Worm10EventKind.zigzagSell => 'ZIGZAG_SELL',
+};
+
+/// The 4-way label the GUI actually shows (2026-10-14, per the user: "in
+/// open column ... there are 4 options to write.. LL or HH or Buy or
+/// Sell, where LL refers to buy signal/long trade, HH refers to sell
+/// signal/short trade, sell refers to zigzag sell signal, buy refers to
+/// zigzag buy signal") - collapses the 6 internal kinds down to which RAW
+/// chart event actually fired, not which internal case/strength it
+/// satisfied: [buyOpen1] shows "LL"; [sellOpen1] shows "HH". The wire
+/// string itself (persisted/used for decision logic) is unchanged - this
+/// is a display-only mapping, applied wherever a worm10 event kind is
+/// shown to the user.
+String worm10EventKindDisplayLabel(Worm10EventKind k) => switch (k) {
+  Worm10EventKind.buyOpen1 => 'LL',
+  Worm10EventKind.sellOpen1 => 'HH',
+  Worm10EventKind.zigzagBuy => 'Buy',
+  Worm10EventKind.zigzagSell => 'Sell',
+};
+
+/// Same mapping, but tolerant of a plain string that might not even be a
+/// worm10 wire value - e.g. a Signal Flip tag ("HH"/"LL"/"BUY"/"SELL") or
+/// null. Returns [wire] unchanged in that case, so a single call site can
+/// handle both without knowing which technique wrote it.
+String? worm10DisplayLabelOrRaw(String? wire) {
+  if (wire == null) return null;
+  try {
+    return worm10EventKindDisplayLabel(worm10EventKindFromWire(wire));
+  } catch (_) {
+    return wire;
   }
+}
 
-  bool buyHolds(Worm10Bar bar) =>
-      stIsBuyAt[bar.time] == false &&
-      (bar.rsiZone == 'blue' || bar.rsiZone == 'purple');
-  bool sellHolds(Worm10Bar bar) =>
-      stIsBuyAt[bar.time] == true &&
-      (bar.rsiZone == 'green' || bar.rsiZone == 'yellow');
+/// One worm_10_26/spy_9_26 derived event on one bar - same per-bar shape as
+/// [Signal], six kinds instead of four.
+class Worm10Event {
+  const Worm10Event({required this.kind, required this.time});
+  final Worm10EventKind kind;
+  final int time;
+}
+
+/// Builds the full chronological event list from one combined
+/// [Worm10Check] read - the SINGLE source both the real-time per-cycle
+/// check and the retroactive audit derive from, so the two can never
+/// disagree with each other.
+///
+/// A raw HH/LL tag only becomes an event when ALL THREE of the user's
+/// steps hold for that bar: (1) the tag itself, (2) Supertrend agrees
+/// (LL needs Supertrend=short, HH needs Supertrend=long), (3) RSI agrees
+/// (LL needs blue/purple, HH needs green/yellow). If step 2 or 3 fails,
+/// the tag is not a reference signal at all and produces NO event.
+///
+/// 2026-10-17 - the underlying plot/Supertrend/RSI state can all stay
+/// true across MANY consecutive bars for one real swing (confirmed:
+/// LTCUSDT printed a qualified LL on every bar from 10-07 21:00 through
+/// 10-08 17:00, one real swing), so consecutive bars resolving to the
+/// exact same kind are collapsed to the last one - one event per real
+/// swing, matching what the chart actually shows, not one per bar.
+List<Worm10Event> deriveWorm10Events(Worm10Check check) {
+  final rsiByTime = {for (final z in check.rsiZones) z.time: z.zone};
+
+  // Supertrend's own latest-known direction as of any bar time - sparse,
+  // persists forward until the next discrete signal (2026-10-14, per the
+  // user: "supertrend need to be sell" means the STATE the last discrete
+  // Supertrend signal established, not a per-bar flag).
+  final supertrendSorted = [...check.supertrend.signals]..sort((a, b) => a.time.compareTo(b.time));
+  TradeDirection? supertrendDirectionAt(int t) {
+    TradeDirection? dir;
+    for (final s in supertrendSorted) {
+      if (s.time > t) break;
+      dir = s.tag == SignalTag.buy ? TradeDirection.long : TradeDirection.short;
+    }
+    return dir;
+  }
 
   final events = <Worm10Event>[];
-  var inZigzagBuyRun = false;
-  var inZigzagSellRun = false;
-  for (final bar in sorted) {
-    if (bar.hh && sellHolds(bar)) {
-      events.add(Worm10Event(type: Worm10EventType.sellOpen1, time: bar.time));
+  for (final s in check.zigzag.signals) {
+    final zone = rsiByTime[s.time];
+    switch (s.tag) {
+      case SignalTag.hh:
+        final rsiOk = zone == RsiZone.yellow || zone == RsiZone.green;
+        if (!rsiOk) break;
+        if (supertrendDirectionAt(s.time) == TradeDirection.long) {
+          events.add(Worm10Event(kind: Worm10EventKind.sellOpen1, time: s.time));
+        }
+      case SignalTag.ll:
+        final rsiOk = zone == RsiZone.blue || zone == RsiZone.purple;
+        if (!rsiOk) break;
+        if (supertrendDirectionAt(s.time) == TradeDirection.short) {
+          events.add(Worm10Event(kind: Worm10EventKind.buyOpen1, time: s.time));
+        }
+      case SignalTag.buy:
+        events.add(Worm10Event(kind: Worm10EventKind.zigzagBuy, time: s.time));
+      case SignalTag.sell:
+        events.add(Worm10Event(kind: Worm10EventKind.zigzagSell, time: s.time));
     }
-    if (bar.ll && buyHolds(bar)) {
-      events.add(Worm10Event(type: Worm10EventType.buyOpen1, time: bar.time));
+  }
+  events.sort((a, b) => a.time.compareTo(b.time));
+
+  // zigzagBuy/zigzagSell (the bare BUY/SELL tag pair) mark where the
+  // signal FIRST fires, not a swing extreme like HH/LL - keep the first
+  // of each run for those two kinds (plain list-adjacency is correct
+  // here; they're not RSI/Supertrend-gated).
+  //
+  // buyOpen1/sellOpen1 are different: two occurrences of the same kind
+  // only belong to the same real swing if the qualifying condition
+  // (RSI zone + Supertrend direction) holds on EVERY bar in between, not
+  // merely "nothing else happened in between" - confirmed live
+  // (LTCUSDT): a qualifying LL at 10-13 00:00 and another at 10-14 14:00
+  // are 38h apart with RSI genuinely leaving blue/purple (going "white")
+  // for ~16h in between - two separate swings, each with its own close.
+  // But that 10-14 14:00 LL and a third one at 10-15 02:00, 12h apart,
+  // have RSI staying blue on EVERY bar in between with no break - one
+  // continuous swing, correctly collapsed to the last (10-15 02:00).
+  final allBarTimesSorted = rsiByTime.keys.toList()..sort();
+
+  bool conditionHoldsAt(Worm10EventKind kind, int t) {
+    final zone = rsiByTime[t];
+    switch (kind) {
+      case Worm10EventKind.buyOpen1:
+        return (zone == RsiZone.blue || zone == RsiZone.purple) &&
+            supertrendDirectionAt(t) == TradeDirection.short;
+      case Worm10EventKind.sellOpen1:
+        return (zone == RsiZone.yellow || zone == RsiZone.green) &&
+            supertrendDirectionAt(t) == TradeDirection.long;
+      case Worm10EventKind.zigzagBuy:
+      case Worm10EventKind.zigzagSell:
+        return false;
     }
-    if (bar.zigzagBuy && !inZigzagBuyRun) {
-      events.add(Worm10Event(type: Worm10EventType.zigzagBuy, time: bar.time));
-    }
-    if (bar.zigzagSell && !inZigzagSellRun) {
-      events.add(Worm10Event(type: Worm10EventType.zigzagSell, time: bar.time));
-    }
-    inZigzagBuyRun = bar.zigzagBuy;
-    inZigzagSellRun = bar.zigzagSell;
   }
 
-  // Neighbouring events of one OPEN1 kind are one swing only if the condition
-  // held on every bar between them. A bar with no RSI reading says nothing
-  // either way, so it's skipped rather than treated as a break.
   bool sameSwing(Worm10Event a, Worm10Event b) {
-    if (a.type != b.type) return false;
-    for (final bar in sorted) {
-      if (bar.rsiZone == null || bar.time <= a.time) continue;
-      if (bar.time >= b.time) break;
-      final holds = a.type == Worm10EventType.buyOpen1
-          ? buyHolds(bar)
-          : sellHolds(bar);
-      if (!holds) return false;
+    if (a.kind != b.kind) return false;
+    for (final t in allBarTimesSorted) {
+      if (t <= a.time) continue;
+      if (t >= b.time) break;
+      if (!conditionHoldsAt(a.kind, t)) return false;
     }
     return true;
   }
 
-  bool isZigzag(Worm10EventType t) =>
-      t == Worm10EventType.zigzagBuy || t == Worm10EventType.zigzagSell;
+  bool keepsFirstOfRun(Worm10EventKind k) =>
+      k == Worm10EventKind.zigzagBuy || k == Worm10EventKind.zigzagSell;
 
-  final kept = <Worm10Event>[];
+  final coalesced = <Worm10Event>[];
   for (var i = 0; i < events.length; i++) {
-    final e = events[i];
-    if (isZigzag(e.type)) {
-      // A zigzag marks where the signal FIRST fires: keep the first of
-      // neighbouring same-kind events.
-      if (i == 0 || events[i - 1].type != e.type) kept.add(e);
-    } else {
-      // HH/LL print on every fresh extreme of a swing: keep the last.
-      if (i == events.length - 1 || !sameSwing(e, events[i + 1])) kept.add(e);
-    }
+    final isFirstOfRun = i == 0 ||
+        (keepsFirstOfRun(events[i].kind)
+            ? events[i - 1].kind != events[i].kind
+            : !sameSwing(events[i - 1], events[i]));
+    final isLastOfRun = i == events.length - 1 ||
+        (keepsFirstOfRun(events[i].kind)
+            ? events[i + 1].kind != events[i].kind
+            : !sameSwing(events[i], events[i + 1]));
+    final keep = keepsFirstOfRun(events[i].kind) ? isFirstOfRun : isLastOfRun;
+    if (keep) coalesced.add(events[i]);
   }
-  return kept;
+  return coalesced;
 }
 
-/// Whether the candle opened at [barTimeSec] has closed. A bar's time is its
-/// OPEN time, so it closes one [period] later.
-bool isCandleClosed(int barTimeSec, Duration period, DateTime now) =>
-    now.toUtc().millisecondsSinceEpoch >=
-    (barTimeSec + period.inSeconds) * 1000;
-
-/// Whether the signal on the bar opened at [barTimeSec] has waited out its
-/// own candle plus one more full candle: bar time + 2 periods (+2 hours on
-/// 1H), §5 of the user's spec.
-bool worm10WaitIsOver(int barTimeSec, Duration period, DateTime now) =>
-    now.toUtc().millisecondsSinceEpoch >=
-    (barTimeSec + period.inSeconds * 2) * 1000;
-
-enum Worm10Direction { buy, sell }
-
-/// Which side a bare event type represents, independent of any running
-/// state - used wherever code needs "which way does this event point"
-/// without going through the full decision table (voice announcements,
-/// display-only previews). buyOpen1/zigzagBuy -> buy; sellOpen1/zigzagSell
-/// -> sell.
-Worm10Direction worm10EventDirection(Worm10EventType type) =>
-    switch (type) {
-      Worm10EventType.buyOpen1 || Worm10EventType.zigzagBuy => Worm10Direction.buy,
-      Worm10EventType.sellOpen1 || Worm10EventType.zigzagSell => Worm10Direction.sell,
-    };
-
-/// Current running state for one pair/category, as the decision table
-/// (§4 of the spec) understands it.
-enum Worm10Running { none, buy, sell }
-
-enum Worm10Action { open, recycle, flip, updateOnly, none }
+enum Worm10Action { openFresh, recycle, flip, update, none }
 
 class Worm10Decision {
-  const Worm10Decision({
-    required this.action,
-    this.direction,
-  });
+  const Worm10Decision({required this.action, required this.resultDirection});
+
   final Worm10Action action;
-  final Worm10Direction? direction;
+
+  /// The direction the pair is in AFTER this event resolves - null only
+  /// when [action] is [Worm10Action.none] and nothing was running before
+  /// either.
+  final TradeDirection? resultDirection;
 }
 
-/// The decision table itself (§4), pure and total - every (running, event)
-/// combination the spec defines, nothing inferred. `event` is the single
-/// most recent qualifying event as of the moment this fires (already
-/// triple-read-confirmed and past the survive-one-candle wait by the
-/// caller - this function has no notion of timing at all).
-Worm10Decision worm10DecisionFor(
-  Worm10Running running,
-  Worm10EventType event,
-) {
-  switch (running) {
-    case Worm10Running.none:
-      switch (event) {
-        case Worm10EventType.buyOpen1:
-          return const Worm10Decision(
-            action: Worm10Action.open,
-            direction: Worm10Direction.buy,
-          );
-        case Worm10EventType.sellOpen1:
-          return const Worm10Decision(
-            action: Worm10Action.open,
-            direction: Worm10Direction.sell,
-          );
-        case Worm10EventType.zigzagBuy:
-        case Worm10EventType.zigzagSell:
-          return const Worm10Decision(action: Worm10Action.none);
+/// The one pure state-transition rule, applied to a single event against
+/// whatever is currently running ([current] - null means flat/waiting).
+/// Used identically by the real-time per-cycle check (against the single
+/// latest event) and the retroactive audit (walked forward across every
+/// event since the running position's own recorded Start) - see this
+/// file's own top-of-file doc comment for the full case-by-case reasoning,
+/// confirmed directly with the user across multiple corrected rounds.
+Worm10Decision worm10DecisionFor(TradeDirection? current, Worm10EventKind kind) {
+  switch (kind) {
+    case Worm10EventKind.buyOpen1:
+      if (current == null) {
+        return const Worm10Decision(action: Worm10Action.openFresh, resultDirection: TradeDirection.long);
       }
-    case Worm10Running.buy:
-      switch (event) {
-        case Worm10EventType.buyOpen1:
-          return const Worm10Decision(
-            action: Worm10Action.recycle,
-            direction: Worm10Direction.buy,
-          );
-        case Worm10EventType.sellOpen1:
-        case Worm10EventType.zigzagSell:
-          return const Worm10Decision(
-            action: Worm10Action.flip,
-            direction: Worm10Direction.sell,
-          );
-        case Worm10EventType.zigzagBuy:
-          return const Worm10Decision(action: Worm10Action.updateOnly);
+      if (current == TradeDirection.long) {
+        return const Worm10Decision(action: Worm10Action.recycle, resultDirection: TradeDirection.long);
       }
-    case Worm10Running.sell:
-      switch (event) {
-        case Worm10EventType.sellOpen1:
-          return const Worm10Decision(
-            action: Worm10Action.recycle,
-            direction: Worm10Direction.sell,
-          );
-        case Worm10EventType.buyOpen1:
-        case Worm10EventType.zigzagBuy:
-          return const Worm10Decision(
-            action: Worm10Action.flip,
-            direction: Worm10Direction.buy,
-          );
-        case Worm10EventType.zigzagSell:
-          return const Worm10Decision(action: Worm10Action.updateOnly);
+      return const Worm10Decision(action: Worm10Action.flip, resultDirection: TradeDirection.long);
+    case Worm10EventKind.sellOpen1:
+      if (current == null) {
+        return const Worm10Decision(action: Worm10Action.openFresh, resultDirection: TradeDirection.short);
       }
+      if (current == TradeDirection.short) {
+        return const Worm10Decision(action: Worm10Action.recycle, resultDirection: TradeDirection.short);
+      }
+      return const Worm10Decision(action: Worm10Action.flip, resultDirection: TradeDirection.short);
+    case Worm10EventKind.zigzagBuy:
+      if (current == TradeDirection.short) {
+        return const Worm10Decision(action: Worm10Action.flip, resultDirection: TradeDirection.long);
+      }
+      if (current == TradeDirection.long) {
+        return const Worm10Decision(action: Worm10Action.update, resultDirection: TradeDirection.long);
+      }
+      return const Worm10Decision(action: Worm10Action.none, resultDirection: null);
+    case Worm10EventKind.zigzagSell:
+      if (current == TradeDirection.long) {
+        return const Worm10Decision(action: Worm10Action.flip, resultDirection: TradeDirection.short);
+      }
+      if (current == TradeDirection.short) {
+        return const Worm10Decision(action: Worm10Action.update, resultDirection: TradeDirection.short);
+      }
+      return const Worm10Decision(action: Worm10Action.none, resultDirection: null);
   }
+}
+
+/// Ignite = fill on the CURRENT signal (2026-10-20, per the user: "once
+/// pair is ignited, this pair will be filled according to current signal.
+/// app will not wait for new signal to occur ... decide what is the signal
+/// direction, then make the filling"). Only ever changes the outcome for a
+/// FLAT ignited pair whose latest event is a bare zigzag (which
+/// [worm10DecisionFor] deliberately never opens on) - it opens in that
+/// event's direction instead. Everything else (running trades, OPEN1
+/// events, non-ignited pairs) is returned unchanged.
+Worm10Decision worm10DecisionWithIgnite(TradeDirection? current, Worm10EventKind kind, {required bool ignited}) {
+  final base = worm10DecisionFor(current, kind);
+  if (!ignited || current != null || base.action != Worm10Action.none) return base;
+  return Worm10Decision(
+    action: Worm10Action.openFresh,
+    resultDirection: kind == Worm10EventKind.zigzagBuy || kind == Worm10EventKind.buyOpen1
+        ? TradeDirection.long
+        : TradeDirection.short,
+  );
 }

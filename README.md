@@ -24,30 +24,32 @@ mapping, and what's real vs. what's deliberately deferred (see
 
 ## Running it
 
-```bash
-# 1. The dashboard GUI (start this first — it controls the engine):
-flutter run -d linux    # or macos / windows / your target
+Windows only.
 
-# 2. Claude Desktop's MCP server (point Claude Desktop's MCP config at this):
-dart run bin/mcp_server.dart
+```bash
+flutter run -d windows
 ```
 
-The engine is launched BY the GUI's Power toggle, not run standalone
-(`dart run bin/engine.dart` manually will self-terminate within ~60s since
-the GUI isn't there to keep its heartbeat file fresh — see PRD §4.4). Power
-off always stops the engine too, with no exception.
+Power works like tradingMT5's:
 
-All three read/write the same data directory: `$TRADING_PIONEX_HOME`, or
-`~/.tradingpionex` by default (config.json, .env, logs/, brain/, and the
-PAUSE/STOP/CHECKNOW control files). Enter your Pionex API key and secret in
-the app's **Settings** screen. They are saved only in that data directory,
-never in this code or repo.
+- The app always opens with Power OFF.
+- Power ON starts the engine (`trading_pionex_engine.exe`, next to the app).
+- Power OFF stops it: it asks the engine to shut down, waits 10s, then runs
+  `taskkill /F`. Auto goes off too.
+- Closing the app does the same (it asks first if Power is on). If the app
+  crashes, the engine stops itself within 60s once the app's heartbeat file
+  goes stale.
+- Only one copy of the app runs at a time.
+- While Power is on, a watchdog restarts the engine if it dies.
 
-**Known environment note:** if this project directory lives on a FAT32/exFAT
-mount (as it currently does on this machine — `/media/.../PARTITION11`),
-built binaries lose their executable bit (`fmask=0022`), which can make
-`flutter run -d linux` hang trying to launch the built app. `flutter build
-linux` itself still works; copying the resulting `build/linux/x64/*/bundle/`
-to an ext4-backed path (e.g. under `$HOME`) before running it works around
-this. Worth moving the project off FAT32 if this becomes a recurring
-friction point.
+Running bots stay open on Pionex while Power is off.
+
+TradingView Desktop is shared with tradingMT5 (one chart tab each, on debug
+port 9222), so this app never starts, restarts or kills TradingView. Open
+it yourself with `--remote-debugging-port=9222`.
+
+Everything reads and writes one data directory: `%TRADING_PIONEX_HOME%`, or
+`%USERPROFILE%\.tradingpionex` by default (config.json, .env, logs/,
+brain/). Enter your Pionex API key and secret in the app's **Settings**
+screen. They are saved only in that data directory, never in this code or
+repo.

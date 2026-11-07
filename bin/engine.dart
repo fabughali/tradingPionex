@@ -16,12 +16,11 @@ import 'package:trading_pionex/data/models/app_config.dart';
 // within ~60s if the GUI's own heartbeat file goes stale (see PRD §4.4,
 // `EngineService._checkGuiHeartbeat`). A manual `dart run bin/engine.dart`
 // with no GUI ever opened will self-exit the same way shortly after
-// starting — the engine has no standalone/headless mode as of 2026-10-20,
-// by design. Runs on the same machine as TradingView Desktop, since CDP +
-// X11 access must stay local to that box.
+// starting — the engine has no standalone/headless mode, by design. Runs on
+// the same Windows PC as TradingView Desktop, since CDP is local-only.
 //
 // Configure the data directory with TRADING_PIONEX_HOME (defaults to
-// ~/.tradingpionex).
+// %USERPROFILE%\.tradingpionex).
 
 void main() async {
   final storage = CoreStorage.instance;
@@ -30,8 +29,8 @@ void main() async {
   // A malformed config.json/state.json (hand-edited, half-written, or from
   // an incompatible older version) previously crashed here with a bare,
   // unlogged TypeError before AppLogger had written a single line - the
-  // operator would only ever see a stack trace on stderr/the systemd
-  // journal, with nothing in engine.log explaining why. Both the config
+  // operator would only ever see a stack trace on stderr, with nothing in
+  // engine.log explaining why. Both the config
   // parse (loadOrInitConfig) and the risk-state parse (inside EngineService's
   // constructor, via RiskGate) can throw the same way, so both are covered
   // by this one try/catch spanning all of startup's file parsing.
@@ -88,20 +87,15 @@ void main() async {
   }
 
   ProcessSignal.sigint.watch().listen((_) => shutdown('SIGINT'));
-  // Windows (2026-11-01): listening for SIGTERM there raises an unhandled
-  // SignalException that kills this process right after engine.start(), and
-  // nothing can send it one anyway. The GUI's Power off asks through a request
-  // file instead, reaching the same shutdown() path.
-  if (Platform.isWindows) {
-    Timer.periodic(const Duration(seconds: 1), (_) {
-      if (storage.fileExists(storage.engineShutdownRequestFile)) {
-        storage.deleteFileIfExists(storage.engineShutdownRequestFile);
-        shutdown('shutdown request');
-      }
-    });
-  } else {
-    ProcessSignal.sigterm.watch().listen((_) => shutdown('SIGTERM'));
-  }
+  // Windows has no SIGTERM: the app's Power off / close asks through this
+  // request file (checked every second), then force-stops after 10s if
+  // needed (WindowsEngineStopper).
+  Timer.periodic(const Duration(seconds: 1), (_) {
+    if (storage.fileExists(storage.engineShutdownRequestFile)) {
+      storage.deleteFileIfExists(storage.engineShutdownRequestFile);
+      shutdown('shutdown request');
+    }
+  });
   // Per the user (2026-09-14): "i want engine stop when there is no auto
   // trade" - the engine can now decide to shut ITSELF down on its own (see
   // EngineService.onSelfExitRequested, which also covers the 2026-10-20

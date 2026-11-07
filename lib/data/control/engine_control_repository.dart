@@ -5,6 +5,7 @@ import 'package:path/path.dart' as p;
 import '../../core/core_api.dart';
 import '../../core/core_storage.dart';
 import '../../core/engine_process.dart';
+import '../../core/windows_engine_stop.dart';
 import '../config/config_loader.dart';
 import '../identity/auto_managed_store.dart';
 import '../identity/bot_category_store.dart';
@@ -544,52 +545,51 @@ class EngineControlRepository {
     }
   }
 
-  /// Gracefully stops the engine process (SIGTERM, same as a manual
-  /// restart) if it's running, and waits briefly for its PID file to be
-  /// removed so `isEngineProcessAlive` is accurate right after this
-  /// returns - the Power switch's own color/position depends on that being
-  /// true in both directions, not just after a launch.
-  Future<bool> stopEngineProcess({
-    Duration timeout = const Duration(seconds: 10),
-  }) async {
-    final raw = _storage.readString(_storage.pidFile);
-    final pid = int.tryParse((raw ?? '').trim());
-    if (pid == null) return true; // already not running
-    try {
-      if (Platform.isWindows) {
-        // No SIGTERM there - see engineShutdownRequestFile. Only ask a live
-        // engine; a stale PID file means there's nothing to stop.
-        if (!isEngineProcessAlive) return true;
-        _storage.writeString(_storage.engineShutdownRequestFile, '');
-      } else {
-        Process.runSync('kill', ['-TERM', pid.toString()]);
-      }
-    } catch (e) {
-      _log('ERROR: failed to stop engine process: $e');
-      return false;
-    }
-    final deadline = DateTime.now().add(timeout);
-    while (DateTime.now().isBefore(deadline)) {
-      if (!isEngineProcessAlive) {
+  /// Stops the engine process, tradingMT5's way ([WindowsEngineStopper]): ask
+  /// it to shut down, wait up to 10s, then `taskkill /F`, and clean up its
+  /// pid/heartbeat files. Returns true once no engine process is left.
+  Future<bool> stopEngineProcess() async {
+    final outcome = await WindowsEngineStopper(
+      storage: _storage,
+      isAlive: isEngineProcessAsync,
+      forceKill: forceKillEngine,
+      log: (message, {String level = 'INFO'}) =>
+          _logger.log('[OPERATOR] $message', level: level),
+    ).stop();
+    switch (outcome) {
+      case WindowsStopOutcome.notRunning:
+        break;
+      case WindowsStopOutcome.graceful:
         _log('Engine process stopped.');
-        return true;
-      }
-      await Future<void>.delayed(const Duration(milliseconds: 300));
+      case WindowsStopOutcome.forceKilled:
+        _log('Engine process force-stopped (taskkill /F).');
+      case WindowsStopOutcome.stillAlive:
+        _log('ERROR: engine process is still running after taskkill /F.');
+        return false;
     }
-    _log(
-      'WARNING: engine process did not confirm shutdown within '
-      '${timeout.inSeconds}s of being asked to stop.',
-    );
-    return false;
+    return true;
   }
 
-  /// The GUI's "Power on": makes sure the engine process is actually running
-  /// (launching it if not) before clearing the PAUSE flag, so flipping the
-  /// switch does everything in one step instead of requiring the engine to
-  /// have been started separately first.
-  Future<void> powerOn() async {
-    await launchEngineIfNeeded();
-    resume();
+  /// Whether the user has Power on (see [CoreStorage.powerOnFile]).
+  bool get isPowerOn => _storage.fileExists(_storage.powerOnFile);
+
+  /// Power ON succeeded: remember it, so the watchdog keeps the engine up.
+  void markPowerOn() => _storage.touchFile(_storage.powerOnFile);
+
+  /// Power OFF, tradingMT5's way: everything off. Forgets Power, puts Auto
+  /// off (PAUSE) and stops the engine process (graceful, then taskkill /F).
+  /// Running bots stay open on Pionex, untouched.
+  Future<bool> powerOff() async {
+    _storage.deleteFileIfExists(_storage.powerOnFile);
+    pause();
+    return stopEngineProcess();
+  }
+
+  /// Async check for the GUI's engine watchdog - `tasklist` must not block
+  /// the UI thread.
+  Future<bool> isEngineRunning() async {
+    final pid = int.tryParse((_storage.readString(_storage.pidFile) ?? '').trim());
+    return pid != null && await isEngineProcessAsync(pid);
   }
 
   /// checknow: asks the running engine to do a full checkup on its next tick,
