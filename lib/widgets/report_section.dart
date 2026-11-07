@@ -270,8 +270,9 @@ class ReportSection extends StatelessWidget {
             // next trade table... helps user to know if all pairs updated
             // according to last check now or not" - the CURRENT cycle
             // marker, same convention as the auto-category toggles.
-            label:
-                'Check now ${checkupCycleMarkerFor(engineStatus.checkupCycleMarkerIndex)}',
+            // No ✓ round marker here or on the rows (per the user,
+            // 2026-11-07: the app must not put check marks on Next Trade).
+            label: 'Check now',
             icon: Icons.bolt,
             tone: ReuseButtonTone.neutral,
             loading: checkNowLoading,
@@ -299,17 +300,6 @@ class ReportSection extends StatelessWidget {
             investmentOf: investmentOf,
             onInvestmentChanged: onInvestmentChanged,
             isCheckPending: isCheckPending,
-            // Per the user (2026-09-12): only shows a row's marker once it
-            // matches the CURRENT sweep's own index - an older/no marker
-            // means "not checked yet in this pass," the same "assure if
-            // all list get checked" signal as the auto-category version.
-            cycleMarkerFor: (base) {
-              final stored = storedCheckupMarkerFor(base);
-              if (stored == null || stored != engineStatus.checkupCycleMarkerIndex) {
-                return null;
-              }
-              return checkupCycleMarkerFor(engineStatus.checkupCycleMarkerIndex);
-            },
             blockedByBase: blockedByBase,
             market: market,
             onVisibleSymbols: onVisibleSymbols,
