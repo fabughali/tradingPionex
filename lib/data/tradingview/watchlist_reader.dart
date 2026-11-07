@@ -97,12 +97,55 @@ const _redListExpr = '''(function(wantName) {
   return { found: true, name: name, activeTabName: activeTabName, count: symbols.length, symbols: symbols };
 })(%s)''';
 
-/// Reads the currently active watchlist panel and, if [wantName] is given,
-/// verifies the header title matches it. Returns bare symbols in DOM order.
+/// The active watchlist from TradingView's own server, the same request its
+/// watchlist panel makes, run inside this app's tab with the user's session.
+/// Needed because this app's tab is usually the background tab of a shared
+/// TradingView (found live 2026-11-07): a background tab is never drawn, so
+/// after a reload its watchlist panel stays empty (0 rows) while the list
+/// itself is fine. Read-only GET.
+const _activeListExpr = '''(async function() {
+  try {
+    var r = await fetch('/api/v1/symbols_list/active/', { credentials: 'include' });
+    if (!r.ok) return { found: false, error: 'active list HTTP ' + r.status };
+    var j = await r.json();
+    if (!j || !Array.isArray(j.symbols)) return { found: false, error: 'active list has no symbols' };
+    var symbols = [];
+    for (var i = 0; i < j.symbols.length; i++) {
+      var s = String(j.symbols[i] || '');
+      if (!s || s.indexOf('###') === 0) continue; // section headers
+      var bare = s.indexOf(':') !== -1 ? s.split(':').pop() : s;
+      if (/^(?=.*[A-Z])[A-Z0-9.]{2,15}\$/.test(bare)) symbols.push(bare);
+    }
+    return { found: true, name: j.name || null, symbols: symbols };
+  } catch (e) {
+    return { found: false, error: String(e && e.message || e) };
+  }
+})()''';
+
+/// Reads the active watchlist: from TradingView's server first (works on a
+/// background tab), falling back to the right-side panel. If [wantName] is
+/// given, the panel path verifies the header title matches it. Returns bare
+/// symbols in list order.
 Future<WatchlistReading> readWatchlist(
   CdpClient cdp, {
   String? wantName,
 }) async {
+  try {
+    final api = await cdp.evaluate(_activeListExpr) as Map<String, dynamic>?;
+    final symbols = ((api?['symbols'] as List?) ?? const []).cast<String>();
+    if (api?['found'] == true && symbols.isNotEmpty) {
+      final name = api?['name'] as String?;
+      return WatchlistReading(
+        found: true,
+        name: name,
+        // The server's "active" list IS the selected one.
+        activeTabName: name,
+        symbols: symbols,
+      );
+    }
+  } catch (_) {
+    // Fall through to the panel.
+  }
   final raw =
       await cdp.evaluate(_redListExpr.replaceFirst('%s', jsonEncode(wantName)))
           as Map<String, dynamic>?;
