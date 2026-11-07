@@ -595,11 +595,19 @@ class _PreviewChecklistState extends State<PreviewChecklist> {
   }
 
   /// The icon for each sort, so the button shows which one is active.
-  IconData _sortIcon(MarketSort sort) => switch (sort) {
-    MarketSort.gainers => Icons.trending_up,
-    MarketSort.losers => Icons.trending_down,
-    MarketSort.category => Icons.category_outlined,
-    MarketSort.volume => Icons.bar_chart,
+  Widget _sortIcon(MarketSort sort) => switch (sort) {
+    MarketSort.gainers => const Icon(Icons.trending_up, size: 18),
+    MarketSort.losers => const Icon(Icons.trending_down, size: 18),
+    MarketSort.category => const Icon(Icons.category_outlined, size: 18),
+    MarketSort.volume => const Icon(Icons.bar_chart, size: 18),
+    MarketSort.aToZ => const Text(
+      'A–Z',
+      style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
+    ),
+    MarketSort.zToA => const Text(
+      'Z–A',
+      style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
+    ),
   };
 
   /// The 24h move, green up / red down, like Pionex shows it.
@@ -747,7 +755,7 @@ class _PreviewChecklistState extends State<PreviewChecklist> {
                           IconButton(
                             tooltip: '${_sort.label} - click for '
                                 '${_sort.next.label.toLowerCase()}',
-                            icon: Icon(_sortIcon(_sort), size: 18),
+                            icon: _sortIcon(_sort),
                             visualDensity: VisualDensity.compact,
                             onPressed: () => setState(() {
                               _sort = _sort.next;

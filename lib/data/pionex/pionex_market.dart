@@ -84,7 +84,7 @@ List<MarketPair> buildMarket(
 ];
 
 /// The table's sort, cycled by its sort icon in this order.
-enum MarketSort { gainers, losers, category, volume }
+enum MarketSort { gainers, losers, category, volume, aToZ, zToA }
 
 extension MarketSortX on MarketSort {
   String get label => switch (this) {
@@ -92,6 +92,8 @@ extension MarketSortX on MarketSort {
     MarketSort.losers => 'Top losers first',
     MarketSort.category => 'By category',
     MarketSort.volume => 'By 24h volume (Pionex trend)',
+    MarketSort.aToZ => 'A to Z',
+    MarketSort.zToA => 'Z to A',
   };
 
   MarketSort get next =>
@@ -117,6 +119,10 @@ List<MarketPair> sortMarket(List<MarketPair> pairs, MarketSort sort) {
       });
     case MarketSort.volume:
       out.sort(byVolume);
+    case MarketSort.aToZ:
+      out.sort((a, b) => a.displayPair.compareTo(b.displayPair));
+    case MarketSort.zToA:
+      out.sort((a, b) => b.displayPair.compareTo(a.displayPair));
   }
   return out;
 }

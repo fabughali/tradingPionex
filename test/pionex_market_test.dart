@@ -43,11 +43,13 @@ void main() {
     expect(syms['ETH/BTC'], isNull);
   });
 
-  test('sort icon cycles gainers, losers, category, volume', () {
+  test('sort icon cycles gainers, losers, category, volume, A-Z, Z-A', () {
     expect(MarketSort.gainers.next, MarketSort.losers);
     expect(MarketSort.losers.next, MarketSort.category);
     expect(MarketSort.category.next, MarketSort.volume);
-    expect(MarketSort.volume.next, MarketSort.gainers);
+    expect(MarketSort.volume.next, MarketSort.aToZ);
+    expect(MarketSort.aToZ.next, MarketSort.zToA);
+    expect(MarketSort.zToA.next, MarketSort.gainers);
   });
 
   test('each sort orders the pairs as Pionex would', () {
@@ -58,6 +60,8 @@ void main() {
     expect(order(MarketSort.losers).first, 'UAI');
     expect(order(MarketSort.losers).last, 'AKE');
     expect(order(MarketSort.volume).first, 'BTC');
+    expect(order(MarketSort.aToZ), ['AAPLX', 'AKE', 'BTC', 'ETH', 'UAI', 'USDT']);
+    expect(order(MarketSort.zToA), ['USDT', 'UAI', 'ETH', 'BTC', 'AKE', 'AAPLX']);
     expect(order(MarketSort.category), [
       'BTC', 'AKE', 'UAI', // USDT-M by volume
       'USDT', // COIN-M
