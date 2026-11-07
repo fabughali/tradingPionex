@@ -29,7 +29,7 @@
   "controlsResume": "Resume",
   "controlsCheckNow": "Check now",
   "controlsStopAll": "Stop all auto grids",
-  "controlsPausedNotice": "The engine is force-stopped — no opens or closes will happen until you resume.",
+  "controlsPausedNotice": "Auto is off — nothing is read, opened or closed until Auto is on. Stop-loss protection keeps running.",
   "controlsStop": "Stop",
   "controlsSelectPairsTitle": "Restrict next creation to",
   "controlsSelectPairsHint": "Comma-separated bases, e.g. BTC, ETH",

@@ -82,7 +82,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get controlsPausedNotice =>
-      'The engine is force-stopped — no opens or closes will happen until you resume.';
+      'Auto is off — nothing is read, opened or closed until Auto is on. Stop-loss protection keeps running.';
 
   @override
   String get controlsStop => 'Stop';

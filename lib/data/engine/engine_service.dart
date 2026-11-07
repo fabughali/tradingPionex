@@ -391,7 +391,6 @@ class EngineService {
   };
 
   Timer? _autoLoopTimer1h;
-  Timer? _autoLoopTimer1d;
 
   /// Ticks a lightweight, independent check for [_checkForSelfExit] - per
   /// the user (2026-09-14): "i want engine stop when there is no auto
@@ -597,10 +596,6 @@ class EngineService {
     _autoLoopTimer1h = Timer.periodic(
       Duration(seconds: config.pollIntervalSec),
       (_) => _onAutoLoopTick(AutoCategory.oneHour),
-    );
-    _autoLoopTimer1d = Timer.periodic(
-      Duration(seconds: config.pollIntervalSec),
-      (_) => _onAutoLoopTick(AutoCategory.oneDay),
     );
     _selfExitCheckTimer = Timer.periodic(const Duration(seconds: 30), (_) {
       _checkForSelfExit();
@@ -865,7 +860,6 @@ class EngineService {
   void stop() {
     _loopTimer?.cancel();
     _autoLoopTimer1h?.cancel();
-    _autoLoopTimer1d?.cancel();
     _verifyTimer?.cancel();
     _heartbeatTimer?.cancel();
     _pairActionTimer?.cancel();
@@ -1565,9 +1559,10 @@ class EngineService {
   /// with Power already on). Per the user (2026-09-06): this must happen
   /// on Power-up, not on every tick while Power stays on.
   void _checkPowerUpEdge() {
-    final pausedNow = _forceStopActive();
-    final justPoweredUp = _pauseFileLastSeen != false && !pausedNow;
-    _pauseFileLastSeen = pausedNow;
+    // Power ON starts this process, so its first tick is the Power-up
+    // (Auto is a separate switch now and no longer marks it).
+    final justPoweredUp = _pauseFileLastSeen == null;
+    _pauseFileLastSeen = false;
     if (justPoweredUp) {
       logger.log('POWER UP: refreshing the Pionex futures listing.');
       unawaited(_refreshPionexFuturesListing());
@@ -1985,8 +1980,6 @@ class EngineService {
     switch (category) {
       case AutoCategory.oneHour:
         return DateTime.utc(nowUtc.year, nowUtc.month, nowUtc.day, nowUtc.hour);
-      case AutoCategory.oneDay:
-        return DateTime.utc(nowUtc.year, nowUtc.month, nowUtc.day);
     }
   }
 
@@ -2010,23 +2003,16 @@ class EngineService {
     bool force = false,
   }) async {
     final tag = '[${category.label}]';
-    // Paused (this category's OWN switch off, or Power off) still watches
-    // any Last-marked base for its close - per the user, the engine must
-    // "keep checking up... until signal change" for those even while off.
-    // Every OTHER auto-managed base is skipped entirely while paused (no
-    // new opens, no closes attempted) since the user turned this
-    // category's auto-management off for them.
+    // Auto off, or this category's own chip off: skipped entirely, the same
+    // as tradingMT5 - nothing is read and nothing closes, "Last"-marked bots
+    // included.
     final paused =
         _forceStopActive() ||
         storage.fileExists(storage.autoCategoryPausedFileFor(category));
-    // Per the user (2026-09-05, correcting an earlier misreading): Auto
-    // watches ONLY auto-managed bases - never manual bots, not even to
-    // open an independent grid alongside one. That was wrong; Auto is
-    // never responsible for a manual bot in any way.
-    final allBases = autoManagedByCategory[category]!.loadAutoManagedBases();
+    // Auto watches ONLY auto-managed bases - never manual bots.
     final bases = paused
-        ? allBases.where((b) => retired.isRetiredBase(b, category)).toSet()
-        : allBases;
+        ? <String>{}
+        : autoManagedByCategory[category]!.loadAutoManagedBases();
     if (bases.isEmpty) {
       // Bug fixed 2026-09-14, confirmed live: this early return used to skip
       // the candle-gate write below entirely - an EMPTY category could
@@ -2043,7 +2029,7 @@ class EngineService {
       ).millisecondsSinceEpoch;
       logger.log(
         paused
-            ? 'autoCheckup$tag: off and no Last-marked base needs watching - nothing to do.'
+            ? 'autoCheckup$tag: Auto off - nothing read, nothing done.'
             : 'autoCheckup$tag: no auto-managed bases to check right now.',
       );
       return;
@@ -2716,28 +2702,21 @@ class EngineService {
   }
 
   Future<void> _runCycle() async {
-    // Per the user (2026-09-05): Check Now/Start (the only way _runCycle
-    // ever gets invoked, since Checkup is on-demand only) must still run
-    // its informational scan while Auto is paused - previously this
-    // returned immediately and skipped the ENTIRE cycle, so Check Now
-    // silently did nothing at all while paused. Auto-off's own rule
-    // ("won't open or close anything new until turned back on") still
-    // applies - `tradingPaused` is threaded into _manageGridPair below to
-    // block the actual open/close action, not the scan/report itself.
+    // Auto off works like tradingMT5's (2026-11-07, per the user: "match
+    // MT5"): the whole decision cycle is skipped - no chart reads, no opens,
+    // no closes. Protection of bots already running (TP/SL ratchet, Stop
+    // Loss Lock) runs on its own timers and keeps going.
     final tradingPaused = _forceStopActive();
     if (tradingPaused) {
       if (!_forceStopLogged) {
-        final stopActive = risk.killSwitchTripped;
-        logger.log(
-          stopActive
-              ? 'FORCE STOP active (PAUSE file) + STOP kill-switch present - scanning only, no opens/closes.'
-              : 'FORCE STOP active (PAUSE file) - scanning only (Check Now/Start still runs), no opens/closes.',
-        );
+        logger.log('Auto paused - no reads, no opens, no closes until Auto is on.');
         _forceStopLogged = true;
       }
+      _writeStatus(message: 'Auto paused', busy: false);
+      return;
     } else if (_forceStopLogged) {
       _forceStopLogged = false;
-      logger.log('FORCE STOP cleared - resuming normal operation.');
+      logger.log('Auto on - resuming normal operation.');
     }
 
     _writeStatus(message: 'Checking TradingView connection...', busy: true);

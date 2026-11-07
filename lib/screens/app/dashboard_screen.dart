@@ -345,15 +345,10 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     return true;
   }
 
-  /// Power's tap target (both the label and the switch call this). turnOn
-  /// true: connects + launches the engine process. false: pauses (Auto goes
-  /// off too, since they share the PAUSE flag), offers the Last-selection
-  /// sheet for any running auto bots, then always stops the engine process
-  /// outright (2026-10-20, per the user: "power off == engine is off").
-  /// Replaces the old "linger alive to finish watching a Last-marked bot"
-  /// behavior entirely - a bot still open when Power turns off simply sits
-  /// on Pionex untouched and unmonitored until Power comes back on, exactly
-  /// like every other running bot in this same moment.
+  /// Power's tap target, as in tradingMT5. ON: connects and launches the
+  /// engine. OFF (after a 5s hold): stops the engine - everything off. Auto
+  /// is a separate switch and keeps its state. Running bots stay open on
+  /// Pionex, unmonitored until Power is on again.
   void _setPower(
     EngineControlRepository repo,
     StatusReport status,
@@ -365,7 +360,6 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
       } else {
         // Same as tradingMT5: Power off needs a 5-second hold to confirm.
         if (!await confirmPowerOff(context, closingApp: false)) return;
-        await _showRetireSheet(status.grids.appRunning);
         final stopped = await repo.powerOff();
         _notify(
           stopped
@@ -385,27 +379,16 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     }
   }
 
-  /// Auto's tap target (both the label and the switch call this). turnOn
-  /// true: resumes (clearing the pending selection first if Reset was
-  /// checked) and forces an instant checkup. false: pauses.
+  /// Auto's tap target, as in tradingMT5: a switch of its own, independent
+  /// of Power (it can be set with Power off and keeps its state). ON: resumes
+  /// (clearing the pending selection first if Reset was checked) and, if the
+  /// engine is running, checks the auto bots now. OFF: the engine reads
+  /// nothing, opens nothing and closes nothing until Auto is on.
   void _setAuto(
     EngineControlRepository repo,
     StatusReport status,
     bool turnOn,
   ) {
-    // Per the user: Auto must never appear to turn on while Power is off -
-    // resume()/triggerAutoCheckup() would just write control files nothing
-    // is running to read, since there's no engine process alive to poll
-    // them. Reject up front with a clear snackbar instead of silently
-    // no-op'ing (the switch's own value already stays visually off in this
-    // state via `engineProcessAlive`, but the action itself must refuse too).
-    if (turnOn && !repo.isEngineProcessAlive) {
-      _notify(
-        'Turn Power on first — Auto needs the engine running.',
-        success: false,
-      );
-      return;
-    }
     _run('auto', () async {
       if (turnOn) {
         final resetFromScratch = _resetOnNextAuto;
@@ -413,39 +396,30 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
           repo.clearSelection();
         }
         repo.resume();
-        // Per the user (2026-09-09): turning the MASTER Auto on must do an
-        // instant checkup on each category's own auto bot list, but only
-        // for whichever categories are themselves already on (1m's list if
-        // 1m is on, 1H's if 1H is on, 1D's if 1D is on) - never a category
-        // that's individually paused. The old global triggerAutoCheckup()
-        // touched a file (AUTO_CHECKNOW) the engine no longer reads at all
-        // since the 3-category system replaced the single-category one, so
-        // it was a silent no-op; per-category triggers are what the engine
-        // actually honors.
-        for (final c in allAutoCategories) {
-          if (status.engineStatus.statusFor(c).enabled) {
-            repo.triggerAutoCheckupFor(c);
+        final engineUp = repo.isEngineProcessAlive;
+        // A check only makes sense with the engine running; with Power off
+        // the engine runs its own startup check when Power comes on.
+        if (engineUp) {
+          for (final c in allAutoCategories) {
+            if (status.engineStatus.statusFor(c).enabled) {
+              repo.triggerAutoCheckupFor(c);
+            }
           }
         }
         setState(() => _resetOnNextAuto = false);
         _notify(
-          resetFromScratch
-              ? 'Auto-run resumed from scratch — pending selection cleared, '
-                    'checking auto bots now.'
-              : 'Auto-run resumed — checking auto bots now.',
+          !engineUp
+              ? 'Auto on — it starts when Power is on.'
+              : (resetFromScratch
+                    ? 'Auto on from scratch — pending selection cleared, checking auto bots now.'
+                    : 'Auto on — checking auto bots now.'),
           success: true,
         );
       } else {
-        // Per the user: Auto OFF offers picking which running auto bots
-        // become "Last" (finish naturally, never auto-recreate) before
-        // actually pausing - reuses the same picker Power-down already
-        // shows. Any base selected here keeps getting watched by
-        // auto-checkup even while paused, until it actually closes.
-        await _showRetireSheet(status.grids.appRunning);
         repo.pause();
         _notify(
-          'Auto-run paused — no new opens or closes until Auto is on again '
-          '(except any bot just marked Last, which is still watched for its close).',
+          'Auto off — nothing is read, opened or closed until Auto is on again. '
+          'Stop-loss protection of running bots keeps going.',
           success: true,
         );
       }
@@ -474,128 +448,12 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
           success: true,
         );
       } else {
-        final categoryBots = status.grids.appRunning
-            .where(
-              (b) =>
-                  (repo.botCategories.categoryOf(b.buOrderId) ??
-                      AutoCategory.oneHour) ==
-                  category,
-            )
-            .toList();
-        await _showRetireSheet(categoryBots);
         repo.pauseCategory(category);
         _notify('Auto[${category.label}] paused.', success: true);
       }
     });
   }
 
-  /// The "/last" flow: offered right before Auto turns off and right after
-  /// Power turns off - either way, picking nothing has no effect (nothing
-  /// is retired); it's purely opt-in.
-  Future<void> _showRetireSheet(List<GridBot> autoBots) async {
-    if (autoBots.isEmpty) return;
-    final l10n = AppLocalizations.of(context)!;
-    final selected = <String>{};
-    final confirmed = await showModalBottomSheet<bool>(
-      context: context,
-      showDragHandle: true,
-      isScrollControlled: true,
-      builder: (context) => StatefulBuilder(
-        builder: (context, setSheetState) {
-          final allSelected = selected.length == autoBots.length;
-          return SafeArea(
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(
-                CoreSpacing.lg,
-                0,
-                CoreSpacing.lg,
-                CoreSpacing.lg,
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    l10n.dashboardRetireDialogTitle,
-                    style: Theme.of(context).textTheme.titleMedium,
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    l10n.dashboardRetireDialogBody,
-                    style: Theme.of(context).textTheme.bodySmall,
-                  ),
-                  const Divider(height: CoreSpacing.lg),
-                  CheckboxListTile(
-                    dense: true,
-                    controlAffinity: ListTileControlAffinity.leading,
-                    title: const Text('Select all'),
-                    value: allSelected,
-                    onChanged: (v) => setSheetState(() {
-                      if (v == true) {
-                        selected
-                          ..clear()
-                          ..addAll(autoBots.map((b) => b.base));
-                      } else {
-                        selected.clear();
-                      }
-                    }),
-                  ),
-                  ConstrainedBox(
-                    constraints: const BoxConstraints(maxHeight: 320),
-                    child: ListView(
-                      shrinkWrap: true,
-                      children: autoBots
-                          .map(
-                            (bot) => CheckboxListTile(
-                              dense: true,
-                              title: Text(bot.pairKey),
-                              subtitle: Text(
-                                bot.trend?.wireValue.toUpperCase() ?? '',
-                              ),
-                              value: selected.contains(bot.base),
-                              onChanged: (v) => setSheetState(
-                                () => v == true
-                                    ? selected.add(bot.base)
-                                    : selected.remove(bot.base),
-                              ),
-                            ),
-                          )
-                          .toList(),
-                    ),
-                  ),
-                  const SizedBox(height: CoreSpacing.sm),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.end,
-                    children: [
-                      TextButton(
-                        onPressed: () => Navigator.pop(context, false),
-                        child: const Text('Skip'),
-                      ),
-                      const SizedBox(width: 8),
-                      FilledButton(
-                        onPressed: selected.isEmpty
-                            ? null
-                            : () => Navigator.pop(context, true),
-                        child: Text(l10n.dashboardRetireSelected),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-          );
-        },
-      ),
-    );
-    if (confirmed == true && selected.isNotEmpty) {
-      await _run(
-        'last',
-        () => ref.read(controlRepositoryProvider).lastSelect(selected.toList()),
-        successMessage:
-            'Retired ${selected.length} pair(s) — will finish naturally and never auto-recreate.',
-      );
-    }
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -864,8 +722,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                                           // some other way, without ever
                                           // touching PAUSE).
                                           value:
-                                              !status.paused &&
-                                              engineProcessAlive,
+                                              !status.paused,
                                           activeThumbColor: autoColor,
                                           activeTrackColor: autoColor
                                               .withValues(alpha: 0.5),
@@ -1186,7 +1043,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                                           status.nextCheckupEtaFor,
                                       busy: _busy,
                                       masterActive:
-                                          !status.paused && engineProcessAlive,
+                                          !status.paused,
                                       onToggle: (category, turnOn) =>
                                           _setAutoCategory(
                                             repo,

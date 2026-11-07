@@ -476,25 +476,22 @@ class EngineControlRepository {
     return ms == null ? null : DateTime.fromMillisecondsSinceEpoch(ms);
   }
 
-  /// pause: FORCE STOP — the engine idles every action (opens AND closes),
-  /// existing bots left completely untouched on Pionex.
+  /// Auto OFF (the PAUSE file), as in tradingMT5: the engine reads nothing,
+  /// opens nothing and closes nothing until Auto is on. Protection of bots
+  /// already running keeps going. Independent of Power.
   void pause() {
     _storage.touchFile(_storage.pauseFile);
     _storage.writeJson(_lastPowerDownFile, {
       'at_ms': DateTime.now().millisecondsSinceEpoch,
     });
-    _log('Powered down (PAUSE) — no new grids, no closes, until resumed.');
+    _log('Auto turned OFF.');
   }
 
-  /// resume: removes the FORCE STOP.
+  /// Auto ON.
   bool resume() {
     final was = isPaused;
     _storage.deleteFileIfExists(_storage.pauseFile);
-    _log(
-      was
-          ? 'Powered up (PAUSE removed) — resuming normal checkup.'
-          : 'Power-up requested, but the app was not paused.',
-    );
+    _log(was ? 'Auto turned ON.' : 'Auto ON requested, but it was already on.');
     return was;
   }
 
@@ -576,12 +573,13 @@ class EngineControlRepository {
   /// Power ON succeeded: remember it, so the watchdog keeps the engine up.
   void markPowerOn() => _storage.touchFile(_storage.powerOnFile);
 
-  /// Power OFF, tradingMT5's way: everything off. Forgets Power, puts Auto
-  /// off (PAUSE) and stops the engine process (graceful, then taskkill /F).
-  /// Running bots stay open on Pionex, untouched.
+  /// Power OFF, tradingMT5's way: forgets Power and stops the engine process
+  /// (graceful, then taskkill /F) - everything off. Auto is a separate
+  /// switch and keeps its state, as in tradingMT5. Running bots stay open on
+  /// Pionex, untouched.
   Future<bool> powerOff() async {
     _storage.deleteFileIfExists(_storage.powerOnFile);
-    pause();
+    _log('Power OFF - stopping the engine.');
     return stopEngineProcess();
   }
 

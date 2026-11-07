@@ -108,128 +108,12 @@ class _ControlsScreenState extends ConsumerState<ControlsScreen> {
           success: true,
         );
       } else {
-        final categoryBots = status.grids.appRunning
-            .where(
-              (b) =>
-                  (repo.botCategories.categoryOf(b.buOrderId) ??
-                      AutoCategory.oneHour) ==
-                  category,
-            )
-            .toList();
-        await _showRetireSheet(categoryBots);
         repo.pauseCategory(category);
         _notify('Auto[${category.label}] paused.', success: true);
       }
     });
   }
 
-  /// The "/last" flow: offered right before an Auto category turns off -
-  /// picking nothing has no effect (nothing is retired); it's purely
-  /// opt-in. Same copy-verbatim rationale as [_setAutoCategory].
-  Future<void> _showRetireSheet(List<GridBot> autoBots) async {
-    if (autoBots.isEmpty) return;
-    final l10n = AppLocalizations.of(context)!;
-    final selected = <String>{};
-    final confirmed = await showModalBottomSheet<bool>(
-      context: context,
-      showDragHandle: true,
-      isScrollControlled: true,
-      builder: (context) => StatefulBuilder(
-        builder: (context, setSheetState) {
-          final allSelected = selected.length == autoBots.length;
-          return SafeArea(
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(
-                CoreSpacing.lg,
-                0,
-                CoreSpacing.lg,
-                CoreSpacing.lg,
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    l10n.dashboardRetireDialogTitle,
-                    style: Theme.of(context).textTheme.titleMedium,
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    l10n.dashboardRetireDialogBody,
-                    style: Theme.of(context).textTheme.bodySmall,
-                  ),
-                  const Divider(height: CoreSpacing.lg),
-                  CheckboxListTile(
-                    dense: true,
-                    controlAffinity: ListTileControlAffinity.leading,
-                    title: const Text('Select all'),
-                    value: allSelected,
-                    onChanged: (v) => setSheetState(() {
-                      if (v == true) {
-                        selected
-                          ..clear()
-                          ..addAll(autoBots.map((b) => b.base));
-                      } else {
-                        selected.clear();
-                      }
-                    }),
-                  ),
-                  ConstrainedBox(
-                    constraints: const BoxConstraints(maxHeight: 320),
-                    child: ListView(
-                      shrinkWrap: true,
-                      children: autoBots
-                          .map(
-                            (bot) => CheckboxListTile(
-                              dense: true,
-                              title: Text(bot.pairKey),
-                              subtitle: Text(
-                                bot.trend?.wireValue.toUpperCase() ?? '',
-                              ),
-                              value: selected.contains(bot.base),
-                              onChanged: (v) => setSheetState(
-                                () => v == true
-                                    ? selected.add(bot.base)
-                                    : selected.remove(bot.base),
-                              ),
-                            ),
-                          )
-                          .toList(),
-                    ),
-                  ),
-                  const SizedBox(height: CoreSpacing.sm),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.end,
-                    children: [
-                      TextButton(
-                        onPressed: () => Navigator.pop(context, false),
-                        child: const Text('Skip'),
-                      ),
-                      const SizedBox(width: 8),
-                      FilledButton(
-                        onPressed: selected.isEmpty
-                            ? null
-                            : () => Navigator.pop(context, true),
-                        child: Text(l10n.dashboardRetireSelected),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-          );
-        },
-      ),
-    );
-    if (confirmed == true && selected.isNotEmpty) {
-      await _run(
-        'last',
-        () => ref.read(controlRepositoryProvider).lastSelect(selected.toList()),
-        successMessage:
-            'Retired ${selected.length} pair(s) — will finish naturally and never auto-recreate.',
-      );
-    }
-  }
 
   /// base -> categories with a currently-running auto bot for that exact
   /// base (2026-09-11, per the user's rule: a pair can only have ONE
@@ -760,7 +644,7 @@ class _ControlsScreenState extends ConsumerState<ControlsScreen> {
                                         status.nextCheckupEtaFor,
                                     busy: _busy,
                                     masterActive:
-                                        !status.paused && engineProcessAlive,
+                                        !status.paused,
                                     onToggle: (category, turnOn) =>
                                         _setAutoCategory(
                                           repo,
