@@ -2752,14 +2752,21 @@ class EngineService {
     // MT5"): the whole decision cycle is skipped - no chart reads, no opens,
     // no closes. Protection of bots already running (TP/SL ratchet, Stop
     // Loss Lock) runs on its own timers and keeps going.
+    // An explicit Check Now still runs its scan with Auto off (found live
+    // 2026-11-07: v1.0.5's early return made Check Now do nothing) - with
+    // `tradingPaused` threaded into _manageGridPair, it reports only and
+    // opens/closes nothing.
     final tradingPaused = _forceStopActive();
-    if (tradingPaused) {
+    final checkNowPending = storage.fileExists(storage.checknowFile);
+    if (tradingPaused && !checkNowPending) {
       if (!_forceStopLogged) {
         logger.log('Auto paused - no reads, no opens, no closes until Auto is on.');
         _forceStopLogged = true;
       }
       _writeStatus(message: 'Auto paused', busy: false);
       return;
+    } else if (tradingPaused) {
+      logger.log('Check Now with Auto off - scanning and reporting only, no opens or closes.');
     } else if (_forceStopLogged) {
       _forceStopLogged = false;
       logger.log('Auto on - resuming normal operation.');
