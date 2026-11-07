@@ -11,7 +11,6 @@ import '../data/pionex/pionex_market.dart';
 import '../l10n/app_localizations.dart';
 import '../utilities/util_date.dart';
 import '../utilities/util_string.dart';
-import 'category_knob.dart';
 import 'reuse_button.dart';
 import 'reuse_card.dart';
 import 'reuse_chip.dart';
@@ -222,17 +221,9 @@ class ReportSection extends StatelessWidget {
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context)!;
     final textTheme = Theme.of(context).textTheme;
-    // Per-category counts (2026-09-09, per the user) - each category's own
-    // entries are already one-per-base within that category, so a plain
-    // count per category needs no dedup of its own.
-    final countLabel = allAutoCategories
-        .map(
-          (c) =>
-              '${report.entries.where((e) => e.category == c).length}/${c.label}',
-        )
-        .join(' - ');
     return ReuseCard(
-      title: 'Next Trade: $countLabel',
+      // 1H is the only timeframe, so the title shows just the count.
+      title: 'Next Trade: ${report.entries.length}',
       // Per the user (2026-09-09): the standalone Balance card is gone -
       // shown here, inline on the same row as this card's own title (same
       // text size as the Engine card's copy of it), and again opposite
@@ -783,7 +774,7 @@ class _PreviewChecklistState extends State<PreviewChecklist> {
               previewDataColumns[0], // Pair
               const DataColumn(label: Text('24h %')),
               const DataColumn(label: Text('Category')),
-              previewDataColumns[1], // Interval
+              // No Interval column: 1H is the only timeframe (per the user).
               previewDataColumns[2], // Initial investment
             ],
             rows: [
@@ -897,25 +888,6 @@ class _PreviewChecklistState extends State<PreviewChecklist> {
                             ? row.market!.category.label
                             : '${row.market!.category.label} (not tradable by the bots)',
                         style: textTheme.bodySmall,
-                      ),
-                    ),
-                    DataCell(
-                      CategoryKnob(
-                        value: row.category,
-                        enabled: !widget.busy && row.tradable,
-                        unavailable: row.unavailable,
-                        blocked: row.blocked,
-                        onChanged: (c) {
-                          // Per the user (2026-09-10): tapping the
-                          // already-selected segment again must not pull
-                          // fresh Pionex data again - CategoryKnob fires
-                          // onChanged on every tap regardless of whether
-                          // the value actually changed, so this call site
-                          // is where that gets deduplicated.
-                          if (c == row.category) return;
-                          setState(() => _categoryOverride[row.base] = c);
-                          widget.onCategoryChanged(row.symbol, c);
-                        },
                       ),
                     ),
                     DataCell(
