@@ -32,6 +32,9 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 ArchitecturesInstallIn64BitMode=x64compatible
 ; An update must not overwrite files the running app or engine holds open.
 CloseApplications=yes
+; Tells Windows to refresh its icon cache after install, so an update's new
+; icon shows on the shortcuts and taskbar right away, not the cached old one.
+ChangesAssociations=yes
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
