@@ -1,3 +1,4 @@
+import '../../core/core_storage.dart';
 import '../technique/trending.dart';
 
 /// Every Pionex perpetual future for the Check Now table (2026-11-07, per the
@@ -122,3 +123,42 @@ List<MarketPair> sortMarket(List<MarketPair> pairs, MarketSort sort) {
 
 /// How many rows the table adds per "Show more".
 const int marketPageSize = 100;
+
+/// Pionex's US-stock token perpetuals, read from Pionex's own website market
+/// list (tag `us_stocks`) on 2026-11-07 - Pionex's public API has no category
+/// field. Written once to [CoreStorage.stockTokensFile], which the user can
+/// edit when Pionex adds or removes stock tokens.
+const List<String> defaultStockTokenBases = [
+  'AAOIX', 'AAPLX', 'AAX', 'AMATX', 'AMDX', 'AMZNX', 'APPX', 'ARMX',
+  'ASMLX', 'ASTSX', 'AVGOX', 'AXTIX', 'BABAX', 'BEX', 'BMNRX', 'BNOX',
+  'CEGX', 'CF', 'CIFRX', 'COHRX', 'COINX', 'CPERX', 'CRCLX', 'CRDOX',
+  'CRWVX', 'CSCOX', 'CVXX', 'DELLX', 'DRAMX', 'EWJX', 'EWYX', 'FLNCX',
+  'GEVX', 'GLWX', 'GMEX', 'GOOGLX', 'GSGX', 'HIMSX', 'HOODX', 'IBMX',
+  'INTCX', 'IRENX', 'LITEX', 'LLYX', 'LMTX', 'LNGX', 'LRCXX', 'METAX',
+  'MOSX', 'MPX', 'MRNAX', 'MRVLX', 'MSFTX', 'MSTRX', 'MUX', 'NBISX',
+  'NETX', 'NFLXX', 'NIOX', 'NKEX', 'NOKX', 'NTRX', 'NVDAX', 'OKLOX',
+  'ONDSX', 'ONX', 'ORCLX', 'PAYPX', 'PLTRX', 'QCOMX', 'QQQX', 'RGTIX',
+  'RKLBX', 'RTXX', 'SITMX', 'SKHY', 'SLVX', 'SMCIX', 'SMHX', 'SNDKX',
+  'SNXXX', 'SOXLX', 'SOXSX', 'SOXXX', 'SPCX', 'SPYX', 'STXX', 'TQQQX',
+  'TSLAX', 'TSMX', 'TTEX', 'TXNX', 'UNGX', 'UNHX', 'URAX', 'URNMX',
+  'USARX', 'USOX', 'VGKX', 'VSHX', 'WDCX', 'XYZ',
+];
+
+/// The user's saved stock-token list ([CoreStorage.stockTokensFile]); written
+/// from [defaultStockTokenBases] the first time. A broken file falls back to
+/// the built-in list.
+Set<String> loadStockTokenBases(CoreStorage storage) {
+  try {
+    final raw = storage.readJsonArray(storage.stockTokensFile);
+    if (raw == null) {
+      storage.writeJson(storage.stockTokensFile, defaultStockTokenBases);
+      return defaultStockTokenBases.toSet();
+    }
+    return {
+      for (final e in raw)
+        if ('$e'.trim().isNotEmpty) '$e'.trim().toUpperCase(),
+    };
+  } catch (_) {
+    return defaultStockTokenBases.toSet();
+  }
+}

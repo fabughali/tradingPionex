@@ -38,6 +38,11 @@ class CoreStorage {
   /// read in this round aren't read again.
   String get checkNowPairsFile => p.join(logsDir, 'check-now-pairs.json');
 
+  /// The Pionex stock-token bases (AAPLX, SNDKX...), one JSON array, edited
+  /// by the user when Pionex adds or removes stock tokens. Written from the
+  /// app's built-in list when missing.
+  String get stockTokensFile => p.join(rootDir, 'stock-tokens.json');
+
   /// Held (locked) by the one running GUI - see `GuiInstanceLock`.
   String get guiLockFile => p.join(logsDir, 'gui.lock');
 

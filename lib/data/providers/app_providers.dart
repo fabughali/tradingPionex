@@ -73,13 +73,14 @@ final pionexMarketProvider = StreamProvider.autoDispose<List<MarketPair>>((
   ref,
 ) async* {
   final client = ref.watch(pionexClientProvider);
-  // Pionex's public API has no category field, and its website's market
-  // list refuses non-browser requests, so stock tokens can't be told apart
-  // from crypto yet: they show as USDT-M.
-  const stockBases = <String>{};
+  final storage = ref.watch(storageProvider);
   var last = const <MarketPair>[];
   while (true) {
     final tickers = await client.getPerpTickers();
+    // Re-read each minute so an edit to the saved list shows without a
+    // restart. Pionex's public API has no category field - see
+    // [defaultStockTokenBases].
+    final stockBases = loadStockTokenBases(storage);
     if (tickers.isNotEmpty) last = buildMarket(tickers, stockBases);
     yield last;
     await Future<void>.delayed(const Duration(minutes: 1));
