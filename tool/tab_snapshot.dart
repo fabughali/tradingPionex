@@ -6,8 +6,10 @@ import 'dart:io';
 // Usage: dart run tool/tab_snapshot.dart [port]   (default 9222)
 const _expr = '''(function(){try{var t=sessionStorage.getItem("tvTabOwner");
 var wv=window.TradingViewApi&&window.TradingViewApi._activeChartWidgetWV;
-var c=wv&&wv.value();return JSON.stringify({tag:t,symbol:c&&c.symbol?c.symbol():null,
-res:c&&c.resolution?c.resolution():null,url:location.href});}catch(e){return "error "+e;}})()''';
+var c=wv&&wv.value();var lg=[];document.querySelectorAll("[data-qa-id=legend-source-item]")
+.forEach(function(el){var x=el.querySelector(".title-quatTGAC");lg.push(x?x.textContent.trim():"");});
+return JSON.stringify({tag:t,symbol:c&&c.symbol?c.symbol():null,
+res:c&&c.resolution?c.resolution():null,legend:lg,visible:document.visibilityState,url:location.href});}catch(e){return "error "+e;}})()''';
 
 Future<void> main(List<String> args) async {
   final port = args.isEmpty ? 9222 : int.parse(args.first);

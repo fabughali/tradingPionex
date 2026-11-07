@@ -1,16 +1,16 @@
 /// App-wide constants. Anything the user might reasonably want to change
-/// lives in config.json instead (see data/models/app_config.dart) — this file
+/// lives in config.json instead (see data/models/app_config.dart) â€” this file
 /// is for values that are structural, not user preference.
 class CoreConstants {
   CoreConstants._();
 
   static const String appName = 'TradingPionex';
 
-  /// Shown in Settings → About and logged by the engine at start. Must equal
+  /// Shown in Settings â†’ About and logged by the engine at start. Must equal
   /// `version:` in pubspec.yaml (test/app_version_test.dart enforces it), and
   /// every release must change it: the Windows build refuses to publish a
   /// version that is already released.
-  static const String appVersion = '1.0.1+2';
+  static const String appVersion = '1.0.2+3';
 
   // Mirrors bot-grid.js's MAINLOOP WATCHDOG: a stuck cycle is force-aborted
   // past this ceiling so the engine never wedges itself permanently.

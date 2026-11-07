@@ -615,9 +615,93 @@ class EnforceResult {
   final bool finalRsi;
 }
 
-/// End-to-end: close all indicators, then open the two custom scripts, then
-/// verify — ported 1:1 from lib/enforce.js `enforceCustomScripts`. Idempotent
-/// across repeated runs without a TradingView restart.
+/// Removes every study except the two custom scripts, through the chart API
+/// (`removeEntity`, never `destroy()`), and returns how many were removed.
+/// Works on a background tab, where the legend and its trash buttons are
+/// never drawn.
+Future<int> _removeOtherStudiesViaApi(CdpClient cdp) async {
+  final n = await cdp.evaluate('''(function() {
+    var keepParts = ${jsonEncode(_enforceScripts.map((s) => s.scriptIdPart).toList())};
+    var keepNames = ${jsonEncode(_enforceScriptNames)};
+    var ac = window.TradingViewApi.activeChart();
+    var removed = 0;
+    ac.getAllStudies().forEach(function (s) {
+      var part = '';
+      try { part = ac.getStudyById(s.id).getStudyId(); } catch (e) {}
+      var kept = keepParts.some(function (k) { return String(part).indexOf(k) !== -1; }) ||
+        keepNames.some(function (k) { return String(s.name).indexOf(k) !== -1; });
+      if (kept) return;
+      try { ac.removeEntity(s.id); removed++; } catch (e) {}
+    });
+    return removed;
+  })()''');
+  return (n as num?)?.toInt() ?? 0;
+}
+
+/// Names TradingView reports for the two scripts once loaded (their Pine
+/// titles, not the short saved names).
+const _enforceScriptNames = [
+  'spy_9_26',
+  'worm_10_26',
+  'RSI & Vol & Stochastic RSI & VAPI',
+  'Footprint/VFAS/EMA/HLOTT/MSB/OB/AlphaTrend/ZigZag++/SuperTrend',
+];
+
+/// The insert-API path of [enforceCustomScripts]: null when it could not get
+/// both scripts on, so the caller falls back to the click path.
+Future<EnforceResult?> _enforceViaApi(CdpClient cdp) async {
+  try {
+    await _closeAllDialogs(cdp);
+    await _removeOtherStudiesViaApi(cdp);
+    final addedOk = <String, bool>{};
+    var state = _bothOpen(await _getEnforceState(cdp));
+    for (final script in _enforceScripts) {
+      final present = script.key == 'MSB' ? state.msb : state.rsi;
+      addedOk[script.key] = present || await _addViaInsertApi(cdp, script);
+    }
+    for (var i = 0; i < 20; i++) {
+      state = _bothOpen(await _getEnforceState(cdp));
+      if (state.msb && state.rsi) break;
+      await Future<void>.delayed(const Duration(seconds: 3));
+    }
+    if (!state.msb || !state.rsi) return null;
+    return EnforceResult(
+      status: 'ok',
+      addedOk: addedOk,
+      finalMsb: true,
+      finalRsi: true,
+    );
+  } catch (_) {
+    return null;
+  }
+}
+
+/// Adds one saved Pine script through TradingView's own insert service, the
+/// same call its "My scripts" list makes - no dialog and no clicks. Found
+/// live 2026-11-07: with two apps sharing one TradingView, this app's tab is
+/// usually the background tab, which is never drawn (0 frames a second), so
+/// the Indicators dialog's script list never renders and the click path can
+/// never find the row. This call works whether the tab is in front or not.
+Future<bool> _addViaInsertApi(CdpClient cdp, EnforceScript script) async {
+  try {
+    final result = await cdp.evaluate('''(async function() {
+      var svc = window.TradingViewApi._studyMarket._insertStudyService;
+      var mi = await Promise.race([
+        svc.insertStudy({descriptor: {type: "pine", pineId: ${jsonEncode(script.scriptIdPart)},
+          pineVersion: "last"}, insertionInfo: {}}),
+        new Promise(function (r) { setTimeout(function () { r(null); }, 30000); })]);
+      return mi ? String(mi.id || '') : '';
+    })()''');
+    return (result as String? ?? '').contains(script.scriptIdPart);
+  } catch (_) {
+    return false;
+  }
+}
+
+/// End-to-end: keep only the two custom scripts and add whichever is
+/// missing, then verify. Adds through TradingView's insert API first (works
+/// on a background tab), falling back to the original remove-all + "My
+/// scripts" click path (lib/enforce.js) only if that fails. Idempotent.
 Future<EnforceResult> enforceCustomScripts(String host, int port) async {
   final cdp = await connectToChart(host, port);
   try {
@@ -628,6 +712,9 @@ Future<EnforceResult> enforceCustomScripts(String host, int port) async {
         error: 'TradingView chart API did not become ready in time',
       );
     }
+
+    final viaApi = await _enforceViaApi(cdp);
+    if (viaApi != null) return viaApi;
 
     // Step 1: close ALL currently open indicators (free-account 2-indicator
     // limit; TradingView restores last-open indicators on every launch) and
