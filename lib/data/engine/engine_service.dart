@@ -895,6 +895,16 @@ class EngineService {
   }
 
   void stop() {
+    // A stop mid-scan must not leave "busy" behind for the app to show.
+    try {
+      _writeStatus(
+        message: '',
+        busy: false,
+        checkupPairIndex: 0,
+        checkupPairTotal: 0,
+        checkupCurrentBase: '',
+      );
+    } catch (_) {}
     _loopTimer?.cancel();
     _autoLoopTimer1h?.cancel();
     _verifyTimer?.cancel();

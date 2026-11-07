@@ -794,17 +794,9 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                     // pressed.
                     onVisibleSymbols: (symbols) =>
                         _visibleCheckNowSymbols = symbols,
-                    // Show more: the new rows join the current round; if no
-                    // scan is running, start one for just those.
-                    onShowMore: () {
-                      repo.setCheckNowPairs(
-                        _visibleCheckNowSymbols,
-                        newRound: false,
-                      );
-                      if (!checkupRunning && powerReady) {
-                        _performCheckNow(repo);
-                      }
-                    },
+                    // Show more only shows more rows - nothing is checked
+                    // until Check Now is pressed (per the user, 2026-11-07).
+
                     // Per the user (2026-09-05, correcting an earlier
                     // misreading): Start is an on-spot check of ONLY the
                     // selected pair(s) - never a full Red-list sweep.
@@ -884,47 +876,11 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                     },
                     investmentOf: (symbol) =>
                         repo.pairInvestments.investmentOf(symbol),
-                    onInvestmentChanged: (symbol, amount, category, hasData) async {
-                      repo.setPairInvestment(symbol, amount);
-                      // Per the user (2026-09-11, point 7): a "-" row (no
-                      // data pulled yet) has nothing to reprice - the value
-                      // above is still saved for whenever Check Now
-                      // eventually reaches this pair, but no pull, no
-                      // loading indicator.
-                      if (!hasData) return;
-                      // Per the user (2026-09-11): a fast, Pionex-only pull
-                      // (no TradingView signal recheck) - genuinely
-                      // chart-free on the engine side, so it never waits
-                      // behind an in-flight Check Now sweep.
-                      setState(() => _pendingChecks.add(symbol));
-                      final result = await repo.requestReprice(
-                        symbol,
-                        category,
-                      );
-                      if (mounted) {
-                        setState(() => _pendingChecks.remove(symbol));
-                        // Bug fixed 2026-09-10: this result used to be
-                        // discarded outright. When the fresh pull failed
-                        // (CDP hiccup, timeout, rate limit) the row just kept
-                        // showing whatever actualInvestment/extraMargin the
-                        // LAST successful check had computed - looking
-                        // exactly like "my new investment value was ignored"
-                        // even though the new value WAS saved, the pull to
-                        // re-price it against Pionex just never completed.
-                        // Surfacing the failure here is what actually fixes
-                        // that confusion - it tells the user to retry rather
-                        // than leaving them staring at stale numbers.
-                        if (result['ok'] != true) {
-                          _notify(
-                            'Could not refresh $symbol from Pionex: '
-                            '${result['message'] ?? 'unknown error'} - '
-                            'the figures shown are still the last successful '
-                            'check.',
-                            success: false,
-                          );
-                        }
-                      }
-                    },
+                    // Saves only (per the user, 2026-11-07: no automatic
+                    // checks in Next Trade) - the amount is used when the pair
+                    // is next started.
+                    onInvestmentChanged: (symbol, amount, category, hasData) =>
+                        repo.setPairInvestment(symbol, amount),
                     isCheckPending: (symbol) => _pendingChecks.contains(symbol),
                     storedCheckupMarkerFor: (base) =>
                         repo.checkupCycleMarkerFor(base),
