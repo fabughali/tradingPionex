@@ -613,6 +613,14 @@ class _PreviewChecklistState extends State<PreviewChecklist> {
     return rows;
   }
 
+  /// The icon for each sort, so the button shows which one is active.
+  IconData _sortIcon(MarketSort sort) => switch (sort) {
+    MarketSort.gainers => Icons.trending_up,
+    MarketSort.losers => Icons.trending_down,
+    MarketSort.category => Icons.category_outlined,
+    MarketSort.volume => Icons.bar_chart,
+  };
+
   /// The 24h move, green up / red down, like Pionex shows it.
   Widget _changeCell(BuildContext context, MarketPair? m) {
     if (m == null) return const Text('—');
@@ -753,11 +761,12 @@ class _PreviewChecklistState extends State<PreviewChecklist> {
                           Text(
                             '${rows.length < marketTotal ? rows.length : marketTotal} of $marketTotal',
                           ),
-                          // Cycles gainers -> losers -> category -> volume.
+                          // Cycles gainers -> losers -> category -> volume;
+                          // the icon shows the current sort.
                           IconButton(
                             tooltip: '${_sort.label} - click for '
                                 '${_sort.next.label.toLowerCase()}',
-                            icon: const Icon(Icons.sort, size: 18),
+                            icon: Icon(_sortIcon(_sort), size: 18),
                             visualDensity: VisualDensity.compact,
                             onPressed: () => setState(() {
                               _sort = _sort.next;
@@ -768,10 +777,14 @@ class _PreviewChecklistState extends State<PreviewChecklist> {
                       )
                     : Text('${rows.length} pair${rows.length == 1 ? '' : 's'}'),
               ),
-              previewDataColumns.first,
+              // Per the user (2026-11-07): only these columns. The full
+              // preview (investment, direction, range, TP/SL...) opens by
+              // tapping the pair.
+              previewDataColumns[0], // Pair
               const DataColumn(label: Text('24h %')),
               const DataColumn(label: Text('Category')),
-              ...previewDataColumns.skip(1),
+              previewDataColumns[1], // Interval
+              previewDataColumns[2], // Initial investment
             ],
             rows: [
               for (final row in rows)
@@ -930,19 +943,6 @@ class _PreviewChecklistState extends State<PreviewChecklist> {
                         ),
                       ),
                     ),
-                    for (final cell in previewComputedCells(
-                      row.entry,
-                      pending: widget.isCheckPending(row.symbol),
-                    ))
-                      DataCell(
-                        cell,
-                        onTap: row.entry == null
-                            ? null
-                            : () => context.push(
-                                '/pair-preview',
-                                extra: row.entry,
-                              ),
-                      ),
                   ],
                 ),
             ],

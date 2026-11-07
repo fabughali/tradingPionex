@@ -10,7 +10,7 @@ class CoreConstants {
   /// `version:` in pubspec.yaml (test/app_version_test.dart enforces it), and
   /// every release must change it: the Windows build refuses to publish a
   /// version that is already released.
-  static const String appVersion = '1.0.13+14';
+  static const String appVersion = '1.0.14+15';
 
   // Mirrors bot-grid.js's MAINLOOP WATCHDOG: a stuck cycle is force-aborted
   // past this ceiling so the engine never wedges itself permanently.
