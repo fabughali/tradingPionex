@@ -2002,6 +2002,9 @@ class EngineService {
   /// once per change instead of every tick.
   final Map<AutoCategory, String> _lastIdleNote = {};
 
+  /// Categories whose Power-on reverse check has run in this process.
+  final Set<AutoCategory> _reverseCheckDone = {};
+
   Future<void> _runAutoCheckup(
     AutoCategory category, {
     bool force = false,
@@ -2042,6 +2045,20 @@ class EngineService {
       return;
     }
     _lastIdleNote.remove(category);
+    // Reverse check, as tradingMT5's `_reverseCheckOnTechniqueSwitchIfNeeded`:
+    // the first pass with Auto on after Power ON (this process's start) -
+    // Power ON with Auto already on, or Auto switched on later - sweeps every
+    // auto-managed pair now instead of waiting for the next candle. Each
+    // pair's first check is the immediate one (`_worm10StartupChecked`):
+    // still triple-read, acting on a closed candle without the extra-candle
+    // wait.
+    if (_reverseCheckDone.add(category)) {
+      force = true;
+      logger.log(
+        'autoCheckup$tag: Power on / Auto on - reverse-checking every '
+        'auto-managed pair now.',
+      );
+    }
     final resuming = _autoResumePairs[category] != null;
     // Bug fixed 2026-09-27, real-money-adjacent (per the user: "why when i
     // terminate a bot ... everything stuck" - traced to the GUI, not the

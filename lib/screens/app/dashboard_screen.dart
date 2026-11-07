@@ -20,7 +20,6 @@ import '../../widgets/category_knob.dart';
 import '../../widgets/countdown_text.dart';
 import '../../widgets/grids_table.dart';
 import '../../widgets/pnl_summary_view.dart';
-import '../../widgets/reuse_button.dart';
 import '../../widgets/waiting_bases_view.dart';
 import '../../widgets/reuse_card.dart';
 import '../../widgets/reuse_chip.dart';
@@ -141,11 +140,6 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   bool _actionsBlocked(StatusReport status, bool engineProcessAlive) =>
       _busy || !engineProcessAlive;
 
-  /// Checked while paused (see the checkbox under the Auto switch) means the
-  /// NEXT time Auto is switched on, it clears any pending pair-selection
-  /// first ("reset from scratch") instead of a plain resume. One-shot: reset
-  /// back to false right after Auto is actually turned on.
-  bool _resetOnNextAuto = false;
 
   Timer? _blinkTimer;
   bool _blinkOn = true;
@@ -380,10 +374,10 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   }
 
   /// Auto's tap target, as in tradingMT5: a switch of its own, independent
-  /// of Power (it can be set with Power off and keeps its state). ON: resumes
-  /// (clearing the pending selection first if Reset was checked) and, if the
-  /// engine is running, checks the auto bots now. OFF: the engine reads
-  /// nothing, opens nothing and closes nothing until Auto is on.
+  /// of Power (it can be set with Power off and keeps its state). ON: the
+  /// engine does its reverse check of every auto pair (see the engine's
+  /// `_reverseCheckIfNeeded`). OFF: the engine reads nothing, opens nothing
+  /// and closes nothing until Auto is on.
   void _setAuto(
     EngineControlRepository repo,
     StatusReport status,
@@ -391,28 +385,11 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   ) {
     _run('auto', () async {
       if (turnOn) {
-        final resetFromScratch = _resetOnNextAuto;
-        if (resetFromScratch) {
-          repo.clearSelection();
-        }
         repo.resume();
-        final engineUp = repo.isEngineProcessAlive;
-        // A check only makes sense with the engine running; with Power off
-        // the engine runs its own startup check when Power comes on.
-        if (engineUp) {
-          for (final c in allAutoCategories) {
-            if (status.engineStatus.statusFor(c).enabled) {
-              repo.triggerAutoCheckupFor(c);
-            }
-          }
-        }
-        setState(() => _resetOnNextAuto = false);
         _notify(
-          !engineUp
-              ? 'Auto on — it starts when Power is on.'
-              : (resetFromScratch
-                    ? 'Auto on from scratch — pending selection cleared, checking auto bots now.'
-                    : 'Auto on — checking auto bots now.'),
+          repo.isEngineProcessAlive
+              ? 'Auto on — reverse-checking every auto pair now.'
+              : 'Auto on — it starts when Power is on.',
           success: true,
         );
       } else {
@@ -571,33 +548,6 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                               // sitting visibly higher than the switch.
                               crossAxisAlignment: CrossAxisAlignment.end,
                               children: [
-                                // Per the user (2026-09-09): moved here, in
-                                // the same row as the Power switch, out of
-                                // the old Quick Actions card (now removed -
-                                // Check now moved to the Next Trade card
-                                // instead). ReuseButton's own unified height
-                                // keeps this lined up with the switch with
-                                // no extra wrapping needed here.
-                                ReuseButton(
-                                  label: 'Refresh',
-                                  icon: Icons.sync,
-                                  tone: ReuseButtonTone.neutral,
-                                  loading: _activeAction == 'refresh',
-                                  onPressed:
-                                      (_actionsBlocked(
-                                            status,
-                                            engineProcessAlive,
-                                          ) ||
-                                          !powerReady)
-                                      ? null
-                                      : () => _run(
-                                          'refresh',
-                                          () => repo.refreshSync(),
-                                          successMessage:
-                                              'Synced against Pionex — stale app-bot memory dropped.',
-                                        ),
-                                ),
-                                const SizedBox(width: CoreSpacing.md),
                                 Column(
                                   crossAxisAlignment: CrossAxisAlignment.end,
                                   children: [
@@ -798,37 +748,6 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                                 ),
                               ],
                             ),
-                          ),
-                        ],
-                        if (status.paused) ...[
-                          const SizedBox(height: CoreSpacing.xs),
-                          // Only sets intent for the NEXT time Auto is
-                          // turned on (see above) - checking this box does
-                          // not itself change anything until then. Right-
-                          // aligned to sit under the Power/Auto switches,
-                          // not the "Auto" label on the left.
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.end,
-                            children: [
-                              GestureDetector(
-                                behavior: HitTestBehavior.opaque,
-                                onTap: _busy
-                                    ? null
-                                    : () => setState(
-                                        () => _resetOnNextAuto =
-                                            !_resetOnNextAuto,
-                                      ),
-                                child: const Text('Reset'),
-                              ),
-                              Checkbox(
-                                value: _resetOnNextAuto,
-                                onChanged: _busy
-                                    ? null
-                                    : (v) => setState(
-                                        () => _resetOnNextAuto = v ?? false,
-                                      ),
-                              ),
-                            ],
                           ),
                         ],
                       ],
