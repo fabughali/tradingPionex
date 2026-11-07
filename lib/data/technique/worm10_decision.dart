@@ -90,6 +90,18 @@ class Worm10Event {
   const Worm10Event({required this.kind, required this.time});
   final Worm10EventKind kind;
   final int time;
+
+  // tradingPionex addition (2026-11-07, found live): tradingMT5 compares two
+  // events field by field (kind + time) at each call site; this engine
+  // compares the events themselves (triple read, pending, audit re-read), so
+  // without these every re-read looked like a "disagreement" and nothing was
+  // ever confirmed. Same rule, one place - the decision logic is unchanged.
+  @override
+  bool operator ==(Object other) =>
+      other is Worm10Event && other.kind == kind && other.time == time;
+
+  @override
+  int get hashCode => Object.hash(kind, time);
 }
 
 /// Builds the full chronological event list from one combined

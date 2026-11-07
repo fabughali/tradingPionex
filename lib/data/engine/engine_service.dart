@@ -1848,7 +1848,14 @@ class EngineService {
       // queues/waits for those, below).
       final checkNowBusy = _mainLoopRunning && !_pairActionRunning;
       final startBusy = _pairActionRunning && _pairActionIsStart;
-      if ((checkNowBusy || startBusy) &&
+      // With Auto (or this category) off there is nothing to run, so it must
+      // never take the chart from Check Now (found live: it preempted Check
+      // Now every 5s, did nothing, and Check Now restarted forever).
+      final categoryOff =
+          _forceStopActive() ||
+          storage.fileExists(storage.autoCategoryPausedFileFor(category));
+      if (!categoryOff &&
+          (checkNowBusy || startBusy) &&
           _runningAutoCategory == null &&
           (force || _isNewCandleDueFor(category))) {
         if (checkNowBusy) {
@@ -2758,7 +2765,18 @@ class EngineService {
     // opens/closes nothing.
     final tradingPaused = _forceStopActive();
     final checkNowPending = storage.fileExists(storage.checknowFile);
-    if (tradingPaused && !checkNowPending) {
+    // The Check Now table is filled only by a Check Now press (per the user,
+    // 2026-11-07: Power must not run any checkup on it) - no hourly
+    // automatic sweep. A sweep paused mid-way for a pair action still
+    // resumes.
+    if (!checkNowPending && _checkupResumePairs == null) {
+      _writeStatus(message: '', busy: false);
+      return;
+    }
+    // Consume the request now, not after the 20s reference read: every 5s
+    // tick that still saw the file restarted the sweep (found live).
+    if (checkNowPending) storage.deleteFileIfExists(storage.checknowFile);
+    if (tradingPaused && !checkNowPending && _checkupResumePairs == null) {
       if (!_forceStopLogged) {
         logger.log('Auto paused - no reads, no opens, no closes until Auto is on.');
         _forceStopLogged = true;
@@ -2800,7 +2818,7 @@ class EngineService {
     final refSymbol =
         _pickReferenceSymbol(redList) ??
         (config.gridPairs.isNotEmpty ? config.gridPairs.first.symbol : null);
-    final checkNowTriggered = storage.fileExists(storage.checknowFile);
+    final checkNowTriggered = checkNowPending;
     // Bug fixed 2026-09-11, per the user ("why is syncing bot memory
     // taking so long - check log and power toggle status"): a sweep
     // paused mid-pair for an Auto category (_checkupResumePairs set, see
