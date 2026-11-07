@@ -600,14 +600,9 @@ class _PreviewChecklistState extends State<PreviewChecklist> {
     MarketSort.losers => const Icon(Icons.trending_down, size: 18),
     MarketSort.category => const Icon(Icons.category_outlined, size: 18),
     MarketSort.volume => const Icon(Icons.bar_chart, size: 18),
-    MarketSort.aToZ => const Text(
-      'A–Z',
-      style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
-    ),
-    MarketSort.zToA => const Text(
-      'Z–A',
-      style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
-    ),
+    // Per the user: A–Z is an upward arrow, Z–A a downward arrow.
+    MarketSort.aToZ => const Icon(Icons.arrow_upward, size: 18),
+    MarketSort.zToA => const Icon(Icons.arrow_downward, size: 18),
   };
 
   /// The 24h move, green up / red down, like Pionex shows it.
