@@ -599,6 +599,18 @@ class EngineControlRepository {
     );
   }
 
+  /// Tells the engine which pairs Check Now reads, in the table's order.
+  /// [newRound] true for a Check Now press (read them all again); false for
+  /// "Show more" (same round - only the newly shown pairs get read).
+  void setCheckNowPairs(List<String> symbols, {required bool newRound}) {
+    final current = _storage.readJsonObject(_storage.checkNowPairsFile);
+    final round = (current?['round'] as num?)?.toInt() ?? 0;
+    _storage.writeJson(_storage.checkNowPairsFile, {
+      'round': newRound ? round + 1 : round,
+      'symbols': symbols,
+    });
+  }
+
   /// Asks the running engine to run the Auto-checkup track right now,
   /// forcing its way ahead of a running full Checkup if one happens to be
   /// mid-sweep - Auto ON's own trigger, scoped to auto-managed bases only,

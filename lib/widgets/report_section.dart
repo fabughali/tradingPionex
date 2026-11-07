@@ -7,6 +7,7 @@ import '../data/models/auto_category.dart';
 import '../data/models/engine_status.dart';
 import '../data/models/grid_bot.dart';
 import '../data/models/preview_grid_pair.dart';
+import '../data/pionex/pionex_market.dart';
 import '../l10n/app_localizations.dart';
 import '../utilities/util_date.dart';
 import '../utilities/util_string.dart';
@@ -131,7 +132,16 @@ class ReportSection extends StatelessWidget {
     required this.isCheckPending,
     required this.storedCheckupMarkerFor,
     this.blockedByBase = const {},
+    this.market = const [],
+    this.onVisibleSymbols,
+    this.onShowMore,
   });
+
+  /// See [PreviewChecklist.market], [PreviewChecklist.onVisibleSymbols] and
+  /// [PreviewChecklist.onShowMore] - passed straight through.
+  final List<MarketPair> market;
+  final void Function(List<String> symbols)? onVisibleSymbols;
+  final VoidCallback? onShowMore;
 
   final LastReport report;
   final EngineStatus engineStatus;
@@ -310,6 +320,9 @@ class ReportSection extends StatelessWidget {
               return checkupCycleMarkerFor(engineStatus.checkupCycleMarkerIndex);
             },
             blockedByBase: blockedByBase,
+            market: market,
+            onVisibleSymbols: onVisibleSymbols,
+            onShowMore: onShowMore,
           ),
         ],
       ),
@@ -342,9 +355,24 @@ class PreviewChecklist extends StatefulWidget {
     required this.isCheckPending,
     this.cycleMarkerFor,
     this.blockedByBase = const {},
+    this.market = const [],
+    this.onVisibleSymbols,
+    this.onShowMore,
   });
 
   final List<PreviewGridPair> entries;
+
+  /// Every Pionex perpetual (2026-11-07, per the user): when non-empty the
+  /// table lists all of them in the chosen sort, 100 at a time, with each
+  /// pair's signal data merged in from [entries].
+  final List<MarketPair> market;
+
+  /// Reports the tradable pairs currently shown, in order - what Check Now
+  /// reads.
+  final void Function(List<String> symbols)? onVisibleSymbols;
+
+  /// "Show more" was pressed; [onVisibleSymbols] already has the longer list.
+  final VoidCallback? onShowMore;
 
   /// Red List pairs Pionex doesn't offer as futures - tagged, not
   /// selectable, no computed values (see [UnlistedRedListPair]).
@@ -399,6 +427,13 @@ class PreviewChecklist extends StatefulWidget {
 
 class _PreviewChecklistState extends State<PreviewChecklist> {
   final Set<String> _selected = {};
+
+  /// The table's sort (cycled by the sort icon) and how many rows it shows.
+  MarketSort _sort = MarketSort.gainers;
+  int _visibleCount = marketPageSize;
+
+  /// The market in the current sort, and the rows of it on screen.
+  List<MarketPair> get _sortedMarket => sortMarket(widget.market, _sort);
 
   /// Immediate local echo of a knob change (keyed by base) - the store
   /// write happens right away via [PreviewChecklist.onCategoryChanged], but
@@ -505,6 +540,7 @@ class _PreviewChecklistState extends State<PreviewChecklist> {
     for (final e in widget.entries) {
       byBase.putIfAbsent(e.base, () => {})[e.category] = e;
     }
+    if (widget.market.isNotEmpty) return _buildMarketRows(byBase);
     final rows = [
       for (final base in byBase.keys.toList()..sort())
         _rowViewFor(base, byBase[base]!),
@@ -534,10 +570,75 @@ class _PreviewChecklistState extends State<PreviewChecklist> {
     return rows;
   }
 
+  /// The table's rows when the Pionex market is loaded: the first
+  /// [_visibleCount] pairs in the current sort, each with its signal data (if
+  /// Check Now has read it), then any read pair the market doesn't list.
+  List<_RowView> _buildMarketRows(
+    Map<String, Map<AutoCategory, PreviewGridPair>> byBase,
+  ) {
+    final entryBaseByUpper = {for (final b in byBase.keys) b.toUpperCase(): b};
+    final rows = <_RowView>[];
+    final shown = <String>{};
+    for (final m in _sortedMarket.take(_visibleCount)) {
+      final entryBase = m.category.tradable
+          ? entryBaseByUpper[m.base.toUpperCase()]
+          : null;
+      if (entryBase != null) {
+        shown.add(entryBase);
+        rows.add(_rowViewFor(entryBase, byBase[entryBase]!, market: m));
+        continue;
+      }
+      final key = m.category.tradable ? m.base : m.displayPair;
+      final symbol = m.appSymbol ?? '';
+      rows.add(
+        _RowView(
+          base: key,
+          symbol: symbol,
+          pairKey: m.displayPair,
+          category: _categoryOverride[key] ??
+              (symbol.isEmpty ? AutoCategory.oneHour : widget.categoryOf(symbol)),
+          entry: null,
+          unavailable: allAutoCategories.toSet(),
+          blocked: widget.blockedByBase[key] ?? const {},
+          market: m,
+        ),
+      );
+    }
+    for (final base in byBase.keys) {
+      if (!shown.contains(base) &&
+          !widget.market.any((m) => m.base.toUpperCase() == base.toUpperCase())) {
+        rows.add(_rowViewFor(base, byBase[base]!));
+      }
+    }
+    return rows;
+  }
+
+  /// The 24h move, green up / red down, like Pionex shows it.
+  Widget _changeCell(BuildContext context, MarketPair? m) {
+    if (m == null) return const Text('—');
+    final pct = m.changePct;
+    return Text(
+      '${pct >= 0 ? '+' : ''}${pct.toStringAsFixed(2)}%',
+      style: TextStyle(
+        color: pct >= 0
+            ? context.tradingColors.profit
+            : context.tradingColors.loss,
+        fontWeight: FontWeight.w600,
+      ),
+    );
+  }
+
+  /// The tradable pairs on screen, in order - what Check Now reads.
+  List<String> _visibleTradableSymbols() => [
+    for (final m in _sortedMarket.take(_visibleCount))
+      if (m.appSymbol != null) m.appSymbol!,
+  ];
+
   _RowView _rowViewFor(
     String base,
-    Map<AutoCategory, PreviewGridPair> variants,
-  ) {
+    Map<AutoCategory, PreviewGridPair> variants, {
+    MarketPair? market,
+  }) {
     final any = variants.values.first;
     final category = _categoryOverride[base] ?? widget.categoryOf(any.symbol);
     return _RowView(
@@ -551,6 +652,7 @@ class _PreviewChecklistState extends State<PreviewChecklist> {
           if (!variants.containsKey(c)) c,
       },
       blocked: widget.blockedByBase[base] ?? const {},
+      market: market,
     );
   }
 
@@ -581,6 +683,9 @@ class _PreviewChecklistState extends State<PreviewChecklist> {
     final currentBases = {
       ...widget.entries.map((e) => e.base),
       ...widget.pending.map((p) => p.base),
+      // Market rows shown without a signal yet keep their fields too.
+      for (final m in _sortedMarket.take(_visibleCount))
+        m.category.tradable ? m.base : m.displayPair,
     };
     _selected.removeWhere((b) => !currentBases.contains(b));
     // Dispose and drop controllers for bases that dropped out of the
@@ -598,6 +703,9 @@ class _PreviewChecklistState extends State<PreviewChecklist> {
   Widget build(BuildContext context) {
     final rows = _buildRows();
     final textTheme = Theme.of(context).textTheme;
+    final hasMarket = widget.market.isNotEmpty;
+    if (hasMarket) widget.onVisibleSymbols?.call(_visibleTradableSymbols());
+    final marketTotal = widget.market.length;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -638,9 +746,32 @@ class _PreviewChecklistState extends State<PreviewChecklist> {
               // currently holds, right in the checkbox column's own header
               // cell - "16 pairs" for 16 rows, "1 pair" for exactly one.
               DataColumn(
-                label: Text('${rows.length} pair${rows.length == 1 ? '' : 's'}'),
+                label: hasMarket
+                    ? Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            '${rows.length < marketTotal ? rows.length : marketTotal} of $marketTotal',
+                          ),
+                          // Cycles gainers -> losers -> category -> volume.
+                          IconButton(
+                            tooltip: '${_sort.label} - click for '
+                                '${_sort.next.label.toLowerCase()}',
+                            icon: const Icon(Icons.sort, size: 18),
+                            visualDensity: VisualDensity.compact,
+                            onPressed: () => setState(() {
+                              _sort = _sort.next;
+                              _visibleCount = marketPageSize;
+                            }),
+                          ),
+                        ],
+                      )
+                    : Text('${rows.length} pair${rows.length == 1 ? '' : 's'}'),
               ),
-              ...previewDataColumns,
+              previewDataColumns.first,
+              const DataColumn(label: Text('24h %')),
+              const DataColumn(label: Text('Category')),
+              ...previewDataColumns.skip(1),
             ],
             rows: [
               for (final row in rows)
@@ -744,10 +875,21 @@ class _PreviewChecklistState extends State<PreviewChecklist> {
                           : () =>
                                 context.push('/pair-preview', extra: row.entry),
                     ),
+                    DataCell(_changeCell(context, row.market)),
+                    DataCell(
+                      Text(
+                        row.market == null
+                            ? '—'
+                            : row.tradable
+                            ? row.market!.category.label
+                            : '${row.market!.category.label} (not tradable by the bots)',
+                        style: textTheme.bodySmall,
+                      ),
+                    ),
                     DataCell(
                       CategoryKnob(
                         value: row.category,
-                        enabled: !widget.busy,
+                        enabled: !widget.busy && row.tradable,
                         unavailable: row.unavailable,
                         blocked: row.blocked,
                         onChanged: (c) {
@@ -769,7 +911,7 @@ class _PreviewChecklistState extends State<PreviewChecklist> {
                         child: TextField(
                           controller: _investmentControllerFor(row),
                           focusNode: _investmentFocusNodeFor(row),
-                          enabled: !widget.busy,
+                          enabled: !widget.busy && row.tradable,
                           keyboardType: const TextInputType.numberWithOptions(
                             decimal: true,
                           ),
@@ -805,6 +947,22 @@ class _PreviewChecklistState extends State<PreviewChecklist> {
                 ),
             ],
           ),
+          if (hasMarket && _visibleCount < marketTotal) ...[
+            const SizedBox(height: CoreSpacing.sm),
+            Center(
+              child: ReuseButton(
+                label:
+                    'Show more (${(marketTotal - _visibleCount).clamp(0, marketPageSize)} more)',
+                icon: Icons.expand_more,
+                tone: ReuseButtonTone.neutral,
+                onPressed: () {
+                  setState(() => _visibleCount += marketPageSize);
+                  widget.onVisibleSymbols?.call(_visibleTradableSymbols());
+                  widget.onShowMore?.call();
+                },
+              ),
+            ),
+          ],
           const SizedBox(height: CoreSpacing.sm),
           Align(
             alignment: Alignment.centerRight,
@@ -951,7 +1109,15 @@ class _RowView {
     required this.entry,
     required this.unavailable,
     required this.blocked,
+    this.market,
   });
+
+  /// The pair's Pionex market data (24h move, category), when known.
+  final MarketPair? market;
+
+  /// False for COIN-M / coin futures rows: shown, but the USDT-margined grid
+  /// bots can't trade them, so nothing on the row can be selected.
+  bool get tradable => market?.category.tradable ?? true;
 
   final String base;
   final String symbol;

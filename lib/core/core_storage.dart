@@ -32,6 +32,12 @@ class CoreStorage {
     return p.join(home, '.tradingpionex');
   }
 
+  /// The pairs Check Now reads, in the table's order (written by the app,
+  /// read by the engine): `{round, symbols}`. A new Check Now press starts a
+  /// new round; "Show more" keeps the round and adds rows, so pairs already
+  /// read in this round aren't read again.
+  String get checkNowPairsFile => p.join(logsDir, 'check-now-pairs.json');
+
   /// Held (locked) by the one running GUI - see `GuiInstanceLock`.
   String get guiLockFile => p.join(logsDir, 'gui.lock');
 

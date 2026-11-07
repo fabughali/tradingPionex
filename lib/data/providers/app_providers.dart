@@ -14,6 +14,7 @@ import '../models/app_config.dart';
 import '../models/bot_history_entry.dart';
 import '../models/trade_start_event.dart';
 import '../pionex/pionex_client.dart';
+import '../pionex/pionex_market.dart';
 
 final storageProvider = Provider<CoreStorage>((ref) => CoreStorage.instance);
 
@@ -63,6 +64,25 @@ final statusReportProvider = StreamProvider.autoDispose<StatusReport>((
   while (true) {
     yield await repo.status();
     await Future<void>.delayed(repo.statusPollInterval);
+  }
+});
+
+/// Every Pionex perpetual with its 24h move, volume and category, for the
+/// Check Now table - refreshed every minute (public data, no keys).
+final pionexMarketProvider = StreamProvider.autoDispose<List<MarketPair>>((
+  ref,
+) async* {
+  final client = ref.watch(pionexClientProvider);
+  // Pionex's public API has no category field, and its website's market
+  // list refuses non-browser requests, so stock tokens can't be told apart
+  // from crypto yet: they show as USDT-M.
+  const stockBases = <String>{};
+  var last = const <MarketPair>[];
+  while (true) {
+    final tickers = await client.getPerpTickers();
+    if (tickers.isNotEmpty) last = buildMarket(tickers, stockBases);
+    yield last;
+    await Future<void>.delayed(const Duration(minutes: 1));
   }
 });
 

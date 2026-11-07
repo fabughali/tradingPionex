@@ -268,6 +268,10 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   /// the persistent "Report" section picks up the fresh
   /// `LastReport.generatedAtMs`/entries the moment the sweep actually
   /// finishes, with no extra plumbing needed here.
+  /// The tradable pairs the Check Now table is showing, in its order - what
+  /// Check Now reads (reported by the table on every build).
+  List<String> _visibleCheckNowSymbols = const [];
+
   void _performCheckNow(EngineControlRepository repo) {
     repo.checkNow();
   }
@@ -774,10 +778,33 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                         ? null
                         : () => _run(
                             'checknow',
-                            () async => _performCheckNow(repo),
+                            () async {
+                              repo.setCheckNowPairs(
+                                _visibleCheckNowSymbols,
+                                newRound: true,
+                              );
+                              _performCheckNow(repo);
+                            },
                             successMessage:
-                                'Check started — scanning Pionex top trending pairs; watch the Report section below for fresh results.',
+                                'Check started — reading the ${_visibleCheckNowSymbols.length} tradable pairs shown, in the table\'s order.',
                           ),
+                    market:
+                        ref.watch(pionexMarketProvider).value ?? const [],
+                    // Stored without setState: only read when a button is
+                    // pressed.
+                    onVisibleSymbols: (symbols) =>
+                        _visibleCheckNowSymbols = symbols,
+                    // Show more: the new rows join the current round; if no
+                    // scan is running, start one for just those.
+                    onShowMore: () {
+                      repo.setCheckNowPairs(
+                        _visibleCheckNowSymbols,
+                        newRound: false,
+                      );
+                      if (!checkupRunning && powerReady) {
+                        _performCheckNow(repo);
+                      }
+                    },
                     // Per the user (2026-09-05, correcting an earlier
                     // misreading): Start is an on-spot check of ONLY the
                     // selected pair(s) - never a full Red-list sweep.

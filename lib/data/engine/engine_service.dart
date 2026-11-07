@@ -278,6 +278,22 @@ class EngineService {
   Set<String>? _pionexFuturesBases;
   bool? _pauseFileLastSeen;
 
+  /// The current Check Now round (see [CoreStorage.checkNowPairsFile]) and the
+  /// pairs already read in it.
+  int? _checkNowRound;
+  final Set<String> _checkedInRound = {};
+
+  /// The table's pairs for Check Now, or null if the app hasn't sent any.
+  ({int round, List<String> symbols})? _readCheckNowTablePairs() {
+    final json = storage.readJsonObject(storage.checkNowPairsFile);
+    final symbols = ((json?['symbols'] as List?) ?? const [])
+        .map((e) => '$e'.trim().toUpperCase())
+        .where((e) => e.isNotEmpty)
+        .toList();
+    if (json == null || symbols.isEmpty) return null;
+    return (round: (json['round'] as num?)?.toInt() ?? 0, symbols: symbols);
+  }
+
   /// Check Now's pair list: Pionex's trending USDT-M + tokenized-stock perps
   /// (see technique/trending.dart). Null if Pionex's tickers can't be read,
   /// so the caller falls back to the Red list.
@@ -2904,17 +2920,30 @@ class EngineService {
       );
     }
 
-    // Check Now scans Pionex's trending pairs (2026-11-07, per the user);
-    // the Red list is only the fallback if Pionex's tickers can't be read.
-    final trending = await _trendingUniverse();
-    if (trending == null) {
+    // Check Now reads the pairs the table is showing, in its sort order
+    // (2026-11-07, per the user). Fallbacks: the trending list, then the Red
+    // list.
+    final table = _readCheckNowTablePairs();
+    if (table != null && table.round != _checkNowRound) {
+      _checkNowRound = table.round;
+      _checkedInRound.clear();
+    }
+    final trending = table == null ? await _trendingUniverse() : null;
+    if (table == null && trending == null) {
       logger.log('TRENDING: Pionex tickers unavailable - using the Red list.');
     }
     final pairUniverse =
+        table?.symbols ??
         trending ??
         (redList.isNotEmpty
             ? redList
             : config.gridPairs.map((p) => p.symbol).toList());
+    if (table != null) {
+      logger.log(
+        'CHECK NOW: ${table.symbols.length} pair(s) from the table (round '
+        '${table.round}), ${_checkedInRound.length} already read this round.',
+      );
+    }
 
     Set<String>? pendingSelection;
     final pendingRaw = storage.readJsonArray(storage.pendingCreateFile);
@@ -2974,7 +3003,9 @@ class EngineService {
     // always win and start clean.
     final resuming = _checkupResumePairs != null && !checkNowTriggered;
     final remaining = List<String>.from(
-      resuming ? _checkupResumePairs! : pairUniverse,
+      resuming
+          ? _checkupResumePairs!
+          : pairUniverse.where((s) => !_checkedInRound.contains(s)),
     );
     _checkupResumePairs = null;
     if (resuming) {
@@ -3009,8 +3040,20 @@ class EngineService {
     }
 
     perPairLoop:
-    while (remaining.isNotEmpty) {
+    while (true) {
+      // "Show more" while this scan runs: the table's newly shown pairs join
+      // the end of this same round.
+      final latest = _readCheckNowTablePairs();
+      if (latest != null && latest.round == _checkNowRound) {
+        for (final s in latest.symbols) {
+          if (!_checkedInRound.contains(s) && !remaining.contains(s)) {
+            remaining.add(s);
+          }
+        }
+      }
+      if (remaining.isEmpty) break;
       final symbol = remaining.removeAt(0);
+      _checkedInRound.add(symbol);
       if (_freshCycleRequested) {
         logger.log(
           'mainLoop: cancelling this cycle at $symbol - a fresh checkup was requested (see _runCycleGuarded).',
