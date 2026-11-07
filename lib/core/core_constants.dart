@@ -14,6 +14,12 @@ class CoreConstants {
 
   // Mirrors bot-grid.js's MAINLOOP WATCHDOG: a stuck cycle is force-aborted
   // past this ceiling so the engine never wedges itself permanently.
+  /// Check Now's trending list (technique/trending.dart): Pionex USDT perps
+  /// with at least this much 24h turnover, the biggest 24h movers first,
+  /// capped at [trendingMaxPairs] (each pair takes ~40s of chart time).
+  static const double trendingMinTurnoverUsdt = 1000000;
+  static const int trendingMaxPairs = 20;
+
   static const Duration mainLoopWatchdog = Duration(seconds: 600);
 
   // Per the user (2026-09-05): while Power is on, the app must keep

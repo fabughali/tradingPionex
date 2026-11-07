@@ -776,7 +776,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                             'checknow',
                             () async => _performCheckNow(repo),
                             successMessage:
-                                'Check started — scanning every Red-list pair; watch the Report section below for fresh results.',
+                                'Check started — scanning Pionex top trending pairs; watch the Report section below for fresh results.',
                           ),
                     // Per the user (2026-09-05, correcting an earlier
                     // misreading): Start is an on-spot check of ONLY the

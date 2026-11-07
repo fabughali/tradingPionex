@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import '../../core/core_api.dart';
 import '../../core/core_constants.dart';
 import '../models/balance.dart';
+import '../technique/trending.dart';
 
 /// Signed REST client for https://api.pionex.com — ported 1:1 from
 /// lib/pionex.js, including its exact (non-obvious) endpoint paths and
@@ -253,6 +254,40 @@ class PionexClient {
         .cast<Map<String, dynamic>>();
     if (tickers.isEmpty) return null;
     return _num(tickers.first['close']);
+  }
+
+  /// Every perpetual's 24h numbers (`GET /api/v1/market/tickers?type=PERP`,
+  /// public, unsigned) - backs Check Now's trending list. Empty on failure.
+  Future<List<PerpTicker>> getPerpTickers() async {
+    try {
+      _checkNotBanned();
+    } catch (_) {
+      return const [];
+    }
+    final uri = Uri.parse(
+      '$_base/api/v1/market/tickers',
+    ).replace(queryParameters: {'type': 'PERP'});
+    final sw = Stopwatch()..start();
+    Map<String, dynamic> data;
+    try {
+      data = await _api.getJson(uri, timeout: CoreConstants.pionexRequestTimeout);
+    } catch (e) {
+      _onLog(
+        'PIONEX API GET /api/v1/market/tickers (PERP): FAILED after ${sw.elapsedMilliseconds}ms - $e',
+      );
+      if (e is RateLimitException) _recordRateLimitHit();
+      return const [];
+    }
+    _onLog(
+      'PIONEX API GET /api/v1/market/tickers (PERP): ok in ${sw.elapsedMilliseconds}ms',
+    );
+    if (data['result'] != true) return const [];
+    _recordSuccess();
+    return [
+      for (final j in ((data['data']?['tickers'] as List?) ?? const [])
+          .cast<Map<String, dynamic>>())
+        ?PerpTicker.fromJson(j),
+    ];
   }
 
   Future<List<Map<String, dynamic>>> getBalances() async {

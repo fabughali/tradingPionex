@@ -38,6 +38,7 @@ import '../technique/grid_count.dart';
 import '../technique/liquidation.dart';
 import '../technique/shrink_retry.dart';
 import '../technique/candle_closed.dart';
+import '../technique/trending.dart';
 import '../technique/worm10_decision.dart';
 import '../technique/worm10_pionex.dart';
 import '../technique/zigzag_range.dart';
@@ -276,6 +277,26 @@ class EngineService {
   /// before Pionex has ever actually answered.
   Set<String>? _pionexFuturesBases;
   bool? _pauseFileLastSeen;
+
+  /// Check Now's pair list: Pionex's trending USDT-M + tokenized-stock perps
+  /// (see technique/trending.dart). Null if Pionex's tickers can't be read,
+  /// so the caller falls back to the Red list.
+  Future<List<String>?> _trendingUniverse() async {
+    final tickers = await pionex.getPerpTickers();
+    if (tickers.isEmpty) return null;
+    final list = rankTrending(
+      tickers,
+      minTurnoverUsdt: CoreConstants.trendingMinTurnoverUsdt,
+      maxPairs: CoreConstants.trendingMaxPairs,
+    );
+    if (list.isEmpty) return null;
+    logger.log(
+      'TRENDING: ${list.length} Pionex pair(s) with >= '
+      '\$${(CoreConstants.trendingMinTurnoverUsdt / 1e6).toStringAsFixed(1)}M '
+      '24h turnover, biggest 24h move first: ${list.join(', ')}',
+    );
+    return list;
+  }
 
   Future<void> _refreshPionexFuturesListing() async {
     try {
@@ -2858,9 +2879,17 @@ class EngineService {
       );
     }
 
-    final pairUniverse = redList.isNotEmpty
-        ? redList
-        : config.gridPairs.map((p) => p.symbol).toList();
+    // Check Now scans Pionex's trending pairs (2026-11-07, per the user);
+    // the Red list is only the fallback if Pionex's tickers can't be read.
+    final trending = await _trendingUniverse();
+    if (trending == null) {
+      logger.log('TRENDING: Pionex tickers unavailable - using the Red list.');
+    }
+    final pairUniverse =
+        trending ??
+        (redList.isNotEmpty
+            ? redList
+            : config.gridPairs.map((p) => p.symbol).toList());
 
     Set<String>? pendingSelection;
     final pendingRaw = storage.readJsonArray(storage.pendingCreateFile);
@@ -4993,7 +5022,7 @@ class EngineService {
     );
     Future<Worm10Check> read(String label) => readWorm10Signals(
       _cdp!,
-      symbol,
+      chartSymbolFor(symbol),
       customScripts[0].scriptIdPart,
       customScripts[1].scriptIdPart,
       onDebugError: (msg) =>
@@ -5084,7 +5113,7 @@ class EngineService {
       await Future<void>.delayed(const Duration(seconds: 10));
       final confirm = await readWorm10Signals(
         _cdp!,
-        symbol,
+        chartSymbolFor(symbol),
         customScripts[0].scriptIdPart,
         customScripts[1].scriptIdPart,
         onDebugError: (msg) =>
@@ -5272,7 +5301,7 @@ class EngineService {
     Future<List<Worm10Event>> reread(String label) async => deriveWorm10Events(
       (await readWorm10Signals(
         _cdp!,
-        symbol,
+        chartSymbolFor(symbol),
         customScripts[0].scriptIdPart,
         customScripts[1].scriptIdPart,
         onDebugError: (msg) =>

@@ -206,7 +206,26 @@ String _tickerBase(String s) {
   if (v.contains(':')) v = v.split(':').last;
   if (v.contains('/')) v = v.split('/').first;
   if (v.contains('_')) v = v.split('_').first;
-  return v.replaceAll('USDT', '').replaceAll('.PERP', '');
+  v = v.replaceAll('.PERP', '');
+  // Pionex perpetual charts are named "AKEUSDT.P".
+  if (v.endsWith('.P')) v = v.substring(0, v.length - 2);
+  return v.replaceAll('USDT', '');
+}
+
+/// The TradingView chart a pair is read on (2026-11-07, per the user): the
+/// app trades Pionex perpetuals, so a USDT pair ("AKEUSDT") is read on
+/// Pionex's own perpetual chart, `PIONEX:AKEUSDT.P` - the exact prices the
+/// bot trades on (every Pionex perp checked was listed this way on
+/// TradingView). Anything else (forex like "EURUSD", or an
+/// already-qualified "EXCHANGE:SYMBOL") is left as it is.
+String chartSymbolFor(String symbol) {
+  final s = symbol.trim().toUpperCase();
+  if (s.contains(':')) return s;
+  final bare = s.replaceAll('.PERP', '');
+  if (RegExp(r'^[A-Z0-9]+USDT$').hasMatch(bare) && bare != 'USDT') {
+    return 'PIONEX:$bare.P';
+  }
+  return s;
 }
 
 bool _sameBase(String a, String b) => _tickerBase(a) == _tickerBase(b);
@@ -397,6 +416,7 @@ Future<SetChartViewResult> setChartView(
   String? resolution, {
   Duration timeout = const Duration(seconds: 45),
 }) async {
+  if (symbol != null) symbol = chartSymbolFor(symbol);
   ChartState? current;
   try {
     current = await getChartState(cdp);
