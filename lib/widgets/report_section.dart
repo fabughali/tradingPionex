@@ -134,7 +134,11 @@ class ReportSection extends StatelessWidget {
     this.market = const [],
     this.onVisibleSymbols,
     this.onShowMore,
+    this.pionexBalance,
   });
+
+  /// Pionex's own free USDT, as Pionex shows it (no bookings subtracted).
+  final double? pionexBalance;
 
   /// See [PreviewChecklist.market], [PreviewChecklist.onVisibleSymbols] and
   /// [PreviewChecklist.onShowMore] - passed straight through.
@@ -228,18 +232,16 @@ class ReportSection extends StatelessWidget {
       // shown here, inline on the same row as this card's own title (same
       // text size as the Engine card's copy of it), and again opposite
       // "Engine" on the Engine card.
+      // Pionex's own free balance (per the user, 2026-11-08) - what Pionex
+      // shows. "Free for new trades" (after Waiting bookings and ticked
+      // pairs) is shown above the table.
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Text('Free balance: ', style: textTheme.titleMedium),
+          Text('Balance: ', style: textTheme.titleMedium),
           Text(
-            UtilString.usd(freeBalance),
-            style: textTheme.titleMedium?.copyWith(
-              color: canOpenNewGrid
-                  ? context.tradingColors.profit
-                  : context.tradingColors.warning,
-              fontWeight: FontWeight.w700,
-            ),
+            UtilString.usd(pionexBalance ?? freeBalance),
+            style: textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
           ),
         ],
       ),
@@ -605,6 +607,41 @@ class _PreviewChecklistState extends State<PreviewChecklist> {
     MarketSort.zToA => const Icon(Icons.arrow_upward, size: 18),
   };
 
+  /// Free balance left for new trades: the app's free balance (Pionex's,
+  /// minus Waiting bookings) minus the investments of the pairs ticked here.
+  double _freeForNewTrades(List<_RowView> rows) {
+    final ticked = rows.where((r) => _selected.contains(r.base) && r.tradable);
+    final left = widget.freeBalance - _totalInvestmentFor(ticked);
+    return left < 0 ? 0 : left;
+  }
+
+  /// Ticking books the pair's initial investment; a pair that doesn't fit in
+  /// what's left can't be ticked (per the user, 2026-11-08).
+  void _toggleSelection(_RowView row, bool select) {
+    if (!select) {
+      setState(() => _selected.remove(row.base));
+      return;
+    }
+    final need = widget.investmentOf(row.symbol);
+    final left = _freeForNewTrades(_buildRows());
+    if (need > left) {
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          SnackBar(
+            content: Text(
+              'Not enough free balance for ${row.pairKey}: it needs '
+              '${UtilString.usd(need)}, only ${UtilString.usd(left)} is free for '
+              'new trades.',
+            ),
+            backgroundColor: Theme.of(context).colorScheme.error,
+          ),
+        );
+      return;
+    }
+    setState(() => _selected.add(row.base));
+  }
+
   /// The 24h move, green up / red down, like Pionex shows it.
   Widget _changeCell(BuildContext context, MarketPair? m) {
     if (m == null) return const Text('—');
@@ -718,6 +755,25 @@ class _PreviewChecklistState extends State<PreviewChecklist> {
             style: textTheme.bodySmall,
             overflow: TextOverflow.ellipsis,
           ),
+          // Per the user (2026-11-08): what's left for new trades after the
+          // Waiting pairs' bookings and the pairs ticked here.
+          Text.rich(
+            TextSpan(
+              children: [
+                const TextSpan(text: 'Free for new trades: '),
+                TextSpan(
+                  text: UtilString.usd(_freeForNewTrades(rows)),
+                  style: TextStyle(
+                    fontWeight: FontWeight.w700,
+                    color: _freeForNewTrades(rows) > 0
+                        ? context.tradingColors.profit
+                        : context.tradingColors.warning,
+                  ),
+                ),
+              ],
+            ),
+            style: textTheme.titleSmall,
+          ),
           const Divider(height: CoreSpacing.lg),
           ReuseDataTable(
             // Per the user (2026-09-06): the native leading checkbox can't
@@ -827,11 +883,7 @@ class _PreviewChecklistState extends State<PreviewChecklist> {
                                       (!row.tradable ||
                                           row.blocked.contains(row.category))
                                       ? null
-                                      : (v) => setState(
-                                          () => v == true
-                                              ? _selected.add(row.base)
-                                              : _selected.remove(row.base),
-                                        ),
+                                      : (v) => _toggleSelection(row, v == true),
                                 ),
                         ),
                       ),

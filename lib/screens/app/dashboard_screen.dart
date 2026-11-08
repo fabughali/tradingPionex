@@ -501,7 +501,8 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         Text(
-                          'Free balance: ',
+                          'Balance: ${UtilString.usd(status.balance.free)}   '
+                          'Free for new trades: ',
                           style: Theme.of(context).textTheme.titleMedium,
                         ),
                         Text(
@@ -748,6 +749,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                     report: status.lastReport,
                     engineStatus: status.engineStatus,
                     freeBalance: status.availableBalance,
+                    pionexBalance: status.balance.free,
                     canOpenNewGrid: status.canOpenNewGrid,
                     busy: _actionsBlocked(status, engineProcessAlive),
                     startLoading: _activeAction == 'start-selected',
