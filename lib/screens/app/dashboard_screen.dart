@@ -794,8 +794,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                     // targeted check; whatever Checkup/Auto-checkup pass it
                     // interrupts resumes automatically once it's done.
                     onStart: (symbols) => _run('start-selected', () async {
-                      final wasOff = status.paused;
-                      if (wasOff) repo.resume();
+                      // Start never changes Auto (per the user, 2026-11-08).
                       // Bug fixed 2026-09-10: requestStartAction blocks
                       // until the engine actually finishes (or times out),
                       // so the button's loading/disabled state - driven by
@@ -829,9 +828,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                       final opened = (result['opened'] as List?) ?? const [];
                       final skipped =
                           (result['skipped'] as Map?) ?? const {};
-                      final autoNote = wasOff
-                          ? ' Auto was off, so it has been turned on.'
-                          : '';
+                      const autoNote = '';
                       if (opened.isEmpty && skipped.isEmpty) {
                         _notify(
                           '${result['message'] ?? 'Start did not complete.'}$autoNote',

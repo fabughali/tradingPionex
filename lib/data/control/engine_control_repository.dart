@@ -1659,7 +1659,7 @@ class EngineControlRepository {
       'spot; whatever else is running resumes once done.',
     );
     final effectiveTimeout =
-        timeout ?? Duration(seconds: 30 + 45 * clean.length);
+        timeout ?? Duration(seconds: 30 + 120 * clean.length); // Start fills each pair now
     final deadline = DateTime.now().add(effectiveTimeout);
     final alreadyNotified = <String>{};
     void notifyNewOutcomes(Map<String, dynamic>? progress) {

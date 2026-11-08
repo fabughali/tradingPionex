@@ -4749,41 +4749,24 @@ class EngineService {
       // purpose ("wait for a signal genuinely newer than whatever existed
       // when Start was clicked") - re-Starting an already-waiting base
       // isn't a new baseline moment at all.
-      final alreadyAutoManaged = autoManagedByCategory[pairCategory]!
-          .isAutoManaged(base);
+      // Start does one job (per the user, 2026-11-08): put the pair on
+      // Auto's list and fill it NOW on its current signal - tradingMT5's
+      // Ignite - with the app's own technique (40/60, price range, leverage,
+      // grids, actual investment, extra margin). If it can't fill, the pair
+      // just stays in Waiting.
       retired.removeRetiredBases([(base: base, category: pairCategory)]);
       autoManagedByCategory[pairCategory]!.addBase(base);
-      if (!alreadyAutoManaged) {
-        // Per the user (2026-09-13): "app should not start the bot
-        // immediately. app should wait new signal occurs then start the
-        // bot." Under Worm10, every pair/category already runs the SAME
-        // confirm+wait gate continuously (`_worm10Pending`) - resetting it
-        // here for a genuinely new base means it must independently reconfirm
-        // before this base can open, rather than immediately acting on
-        // whatever happens to already be sitting pending from before Start
-        // was ever clicked. Re-reset on every explicit Start of a genuinely
-        // new base so a second Start click before the first one ever resolved
-        // still gets a clean, fresh gate from right now.
-        _worm10Pending.remove(startEntryKey);
-        // Its first check must also take the normal wait, not the immediate
-        // one Power-on gives a pair already being managed.
-        _worm10StartupChecked.add(startEntryKey);
-        // Persisted (2026-09-13, per the user, after a restart mid-wait
-        // silently opened BCH/AAVE/ADA/BTC/GALA on a stale signal) - see
-        // _reloadWorm10GateIntoMemory's doc.
-        _persistWorm10Pending(startEntryKey, null);
+      final fill = await _pairActionIgnite(symbol);
+      if (fill['ok'] == true) {
+        opened.add(symbol);
       } else {
-        logger.log(
-          'PAIR ACTION START $symbol: already auto-managed and waiting - '
-          'Worm10 gate left as-is, leaving it to the waiting engine\'s normal retry.',
-        );
+        skipped[symbol] = 'waiting - ${fill['message']}';
       }
-      opened.add(symbol);
     }
     final message = opened.isEmpty
-        ? 'Nothing queued (${skipped.entries.map((e) => '${e.key}: ${e.value}').join('; ')}).'
-        : 'Queued for the waiting engine: ${opened.join(', ')}.'
-              '${skipped.isEmpty ? '' : ' Skipped: ${skipped.entries.map((e) => '${e.key} (${e.value})').join(', ')}.'}';
+        ? 'Nothing filled (${skipped.entries.map((e) => '${e.key}: ${e.value}').join('; ')}).'
+        : 'Filling now: ${opened.join(', ')}.'
+              '${skipped.isEmpty ? '' : ' Not filled: ${skipped.entries.map((e) => '${e.key} (${e.value})').join(', ')}.'}';
     return {
       'ok': opened.isNotEmpty,
       'opened': opened,

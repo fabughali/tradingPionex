@@ -507,8 +507,7 @@ class _ControlsScreenState extends ConsumerState<ControlsScreen> {
                             // check of ONLY this pair, never a full
                             // Red-list sweep - and it means "open this
                             // now", so it turns Auto on first if it's off.
-                            final wasOff = status.paused;
-                            if (wasOff) repo.resume();
+                            // Start never changes Auto (per the user, 2026-11-08).
                             // Bug fixed 2026-09-10 - see the Next Trade
                             // table's matching fix: block for the real
                             // duration instead of firing-and-forgetting, so
@@ -517,9 +516,7 @@ class _ControlsScreenState extends ConsumerState<ControlsScreen> {
                             final result = await repo.requestStartAction([
                               symbol,
                             ]);
-                            final autoNote = wasOff
-                                ? ' Auto was off, so it has been turned on.'
-                                : '';
+                            const autoNote = '';
                             final opened =
                                 (result['opened'] as List?) ?? const [];
                             final prefix = alreadyInRedList
