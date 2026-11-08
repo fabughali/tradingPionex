@@ -6165,6 +6165,8 @@ class EngineService {
   /// bots only, per the user ("i am talking here about auto trade only") —
   /// manual bots are never touched here.
   Future<void> _runTpSlRatchetSweep() async {
+    // Auto off = the engine does nothing at all (per the user, 2026-11-08).
+    if (_forceStopActive()) return;
     if (!pionex.available) return;
     for (final bot in _activeGridsById.values.toList()) {
       if (!bot.appInitiated || bot.isManuallyInterrupted) continue;
@@ -6409,6 +6411,8 @@ class EngineService {
   /// user separately tagged that exact (base, category) Last, same gate
   /// every other recycle path already respects.
   Future<void> _runNeverFilledSweep() async {
+    // Auto off = the engine does nothing at all (per the user, 2026-11-08).
+    if (_forceStopActive()) return;
     if (!pionex.available) return;
     // Safe, idempotent, already called from half a dozen other sites in
     // this file (see `_runStopLossLockSweep`'s own copy of this same
@@ -6512,6 +6516,8 @@ class EngineService {
   /// 3 minutes later, so nothing is ever lost, only delayed (same tolerance
   /// this feature was explicitly designed around).
   Future<void> _runStopLossLockSweep() async {
+    // Auto off = the engine does nothing at all (per the user, 2026-11-08).
+    if (_forceStopActive()) return;
     if (!pionex.available) return;
     // Re-entrancy guard: a sweep over many tagged pairs (each a real
     // chart-switch + wait + 6s confirm re-read) can genuinely run longer
