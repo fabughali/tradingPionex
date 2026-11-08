@@ -83,6 +83,10 @@ List<MarketPair> buildMarket(
       ),
 ];
 
+/// Keeps only the pairs the bots can trade (drops COIN-M, coin futures).
+List<MarketPair> tradableMarket(List<MarketPair> market) =>
+    [for (final m in market) if (m.category.tradable) m];
+
 /// The table's sort, cycled by its sort icon in this order.
 enum MarketSort { gainers, losers, category, volume, aToZ, zToA }
 

@@ -35,6 +35,15 @@ void main() {
     });
   });
 
+  test('tradableMarket drops COIN-M and coin futures', () {
+    expect(tradableMarket(market).map((p) => p.displayPair).toList(), [
+      'AKE/USDT',
+      'UAI/USDT',
+      'BTC/USDT',
+      'AAPLX/USDT',
+    ]);
+  });
+
   test('only USDT-settled pairs get an app symbol (tradable)', () {
     final syms = {for (final p in market) p.displayPair: p.appSymbol};
     expect(syms['AKE/USDT'], 'AKEUSDT');

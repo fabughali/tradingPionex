@@ -81,7 +81,9 @@ final pionexMarketProvider = StreamProvider.autoDispose<List<MarketPair>>((
     // restart. Pionex's public API has no category field - see
     // [defaultStockTokenBases].
     final stockBases = loadStockTokenBases(storage);
-    if (tickers.isNotEmpty) last = buildMarket(tickers, stockBases);
+    // Only pairs the bots can trade (USDT-M, stock tokens) are listed or
+    // counted - COIN-M and coin futures are left out (per the user).
+    if (tickers.isNotEmpty) last = tradableMarket(buildMarket(tickers, stockBases));
     yield last;
     await Future<void>.delayed(const Duration(minutes: 1));
   }
