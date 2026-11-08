@@ -683,6 +683,7 @@ class _ControlsScreenState extends ConsumerState<ControlsScreen> {
                     emptyMessage: 'No running auto bots right now.',
                     categoryOf: (id) => repo.botCategories.categoryOf(id),
                     entrySignalFor: (id) => repo.entrySignalFor(id),
+                    closeCandidateFor: repo.closeCandidateFor,
                     cycleMarkerFor: (bot) {
                       final category = repo.botCategories.categoryOf(
                         bot.buOrderId,

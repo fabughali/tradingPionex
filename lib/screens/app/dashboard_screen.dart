@@ -977,6 +977,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                       emptyMessage: 'No running auto bots right now.',
                       categoryOf: (id) => repo.botCategories.categoryOf(id),
                       entrySignalFor: (id) => repo.entrySignalFor(id),
+                      closeCandidateFor: repo.closeCandidateFor,
                       // Per the user (2026-09-12): shows this row's own
                       // category marker ONLY when it matches that
                       // category's CURRENT one - i.e. only once this bot's
@@ -1145,6 +1146,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                       busy: _actionsBlocked(status, engineProcessAlive),
                       emptyMessage: 'No running manual bots right now.',
                       entrySignalFor: (id) => repo.entrySignalFor(id),
+                      closeCandidateFor: repo.closeCandidateFor,
                       stopLossLockedIds: repo.stopLossLockedIds(
                         status.grids.manualRunning,
                       ),

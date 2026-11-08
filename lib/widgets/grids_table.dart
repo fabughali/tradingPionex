@@ -45,6 +45,7 @@ class GridsTable extends StatefulWidget {
     this.categoryOf,
     this.cycleMarkerFor,
     this.entrySignalFor,
+    this.closeCandidateFor,
   });
 
   final List<GridBot> grids;
@@ -149,6 +150,11 @@ class GridsTable extends StatefulWidget {
   /// "—") for a bot opened before this feature existed, or via a path with
   /// no confirmed signal on hand.
   final EntrySignalRecord? Function(String buOrderId)? entrySignalFor;
+
+  /// tradingMT5's Close A / Close B for a running bot - see
+  /// EngineControlRepository.closeCandidateFor.
+  final ({String kind, DateTime barTime, DateTime eta})? Function(GridBot bot)?
+  closeCandidateFor;
 
   @override
   State<GridsTable> createState() => _GridsTableState();
@@ -288,59 +294,45 @@ class _GridsTableState extends State<GridsTable> {
     return '${minutes}m';
   }
 
-  /// Display name for a zone key as stored by `EntrySignalStore` ('yellow'/
-  /// 'green'/'white_upper'/'white_lower'/'purple'/'blue' - White split at
-  /// 50%, matching the user's spec). Legacy only since 2026-09-29 - see
-  /// [EntrySignalMoment.zone]'s doc.
-  String _zoneLabel(String zone) => switch (zone) {
-    'yellow' => 'Yellow',
-    'green' => 'Green',
-    'white_upper' => 'White ≥50',
-    'white_lower' => 'White <50',
-    'purple' => 'Purple',
-    'blue' => 'Blue',
-    _ => zone,
-  };
-
   String _twoDigits(int n) => n.toString().padLeft(2, '0');
-
-  /// `zone`/`value` are always null for a moment recorded since 2026-09-29
-  /// (worm_9_26 is the only signal source now) - falls back to just the
-  /// raw type in that case, and the full "type · zone · value" form for an
-  /// older record that still has them.
-  String _formatMomentShort(EntrySignalMoment m) {
-    if (m.zone == null || m.value == null) return m.type;
-    return '${m.type} · ${_zoneLabel(m.zone!)} · ${m.value!.toStringAsFixed(1)}';
-  }
-
-  String _formatMomentFull(String label, EntrySignalMoment m) {
-    final local = m.at.toLocal();
-    final date =
-        '${local.year}-${_twoDigits(local.month)}-${_twoDigits(local.day)}';
-    final time =
-        '${_twoDigits(local.hour)}:${_twoDigits(local.minute)}:${_twoDigits(local.second)}';
-    final detail = m.zone == null || m.value == null
-        ? m.type
-        : '${m.type}, ${_zoneLabel(m.zone!)} zone, RSI ${m.value!.toStringAsFixed(2)}';
-    return '$label: $detail — $date $time';
-  }
 
   /// Renders "the record" (2026-09-26, per the user: "the record should be
   /// one out of those 60 entries") - which exact (signal, zone) entry
   /// opened this bot, and, once known, which one closed it. "—" for a bot
   /// with no record on file (opened before this feature existed, or via a
   /// path with no confirmed signal on hand, e.g. a forced reignite).
-  Widget _entrySignalCell(EntrySignalRecord? record) {
-    if (record == null) return const Text('—');
-    final text = record.close == null
-        ? _formatMomentShort(record.open)
-        : '${_formatMomentShort(record.open)}  →  ${_formatMomentShort(record.close!)}';
-    return Tooltip(
-      message: record.close == null
-          ? _formatMomentFull('Opened', record.open)
-          : '${_formatMomentFull('Opened', record.open)}\n${_formatMomentFull('Closed', record.close!)}',
-      child: Text(text, style: const TextStyle(fontSize: 12)),
-    );
+  /// tradingMT5's labels for a Hybrid Decision event.
+  String _eventLabel(String type) => switch (type) {
+    'buyOpen1' => 'LL',
+    'sellOpen1' => 'HH',
+    'zigzagBuy' => 'Buy',
+    'zigzagSell' => 'Sell',
+    _ => type,
+  };
+
+  String _shortTime(DateTime t) {
+    final l = t.toLocal();
+    return '${_twoDigits(l.month)}-${_twoDigits(l.day)} ${_twoDigits(l.hour)}:${_twoDigits(l.minute)}';
+  }
+
+  /// Open / Update / Close A / Close B, as tradingMT5 shows them on a
+  /// running auto trade.
+  Widget _entrySignalCell(GridBot bot, EntrySignalRecord? record) {
+    final candidate = widget.closeCandidateFor?.call(bot);
+    if (record == null && candidate == null) return const Text('—');
+    final lines = <String>[
+      if (record != null)
+        'Open: ${_eventLabel(record.open.type)} ${_shortTime(record.open.at)}',
+      if (record?.update != null)
+        'Update: ${_eventLabel(record!.update!.type)} ${_shortTime(record.update!.at)}',
+      if (candidate != null) ...[
+        'Close A: ${_eventLabel(candidate.kind)} ${_shortTime(candidate.barTime)}',
+        'Close B: watching until ${_shortTime(candidate.eta)}',
+      ],
+      if (record?.close != null)
+        'Closed: ${_eventLabel(record!.close!.type)} ${_shortTime(record.close!.at)}',
+    ];
+    return Text(lines.join('\n'), style: const TextStyle(fontSize: 12));
   }
 
   @override
@@ -621,7 +613,7 @@ class _GridsTableState extends State<GridsTable> {
                       ? ReuseChipTone.success
                       : ReuseChipTone.danger,
                 ),
-          _entrySignalCell(widget.entrySignalFor?.call(g.buOrderId)),
+          _entrySignalCell(g, widget.entrySignalFor?.call(g.buOrderId)),
           Text(g.status),
           Text(g.leverage == null ? '—' : '${g.leverage!.toStringAsFixed(0)}x'),
           Text(

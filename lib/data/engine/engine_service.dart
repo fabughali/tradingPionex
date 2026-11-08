@@ -5425,24 +5425,42 @@ class EngineService {
     final startEvent = start;
     var trueDir = worm10DecisionFor(null, startEvent.kind).resultDirection!;
     var trueStart = startEvent;
+    Worm10Event? updateEvent;
     final afterStart = auditEvents.where((e) => e.time > startEvent.time).toList()
       ..sort((a, b) => a.time.compareTo(b.time));
     for (final e in afterStart) {
       final decision = worm10DecisionFor(trueDir, e.kind);
       switch (decision.action) {
         case Worm10Action.none:
-        case Worm10Action.update:
           break;
+        case Worm10Action.update:
+          updateEvent = e;
         case Worm10Action.recycle:
           trueStart = e;
+          updateEvent = null;
         case Worm10Action.flip:
         case Worm10Action.openFresh:
           trueDir = decision.resultDirection!;
           trueStart = e;
+          updateEvent = null;
       }
     }
     final trueDirection = gridDirectionOf(trueDir);
     final verdict = '${trueStart.kind.name}@${trueStart.time}';
+
+    // tradingMT5's audit also backfills the Update on a bot already running
+    // the right way.
+    if (trueDirection == runningDirection && updateEvent != null) {
+      final at = DateTime.fromMillisecondsSinceEpoch(updateEvent.time * 1000);
+      final rec = entrySignalStore.recordFor(id);
+      if (rec != null && rec.update?.at != at) {
+        entrySignalStore.recordUpdate(id, at: at, type: updateEvent.kind.name);
+        logger.log(
+          'WORM10 AUDIT $entryKey ($id): backfilled Update '
+          '${updateEvent.kind.name}@${updateEvent.time}.',
+        );
+      }
+    }
 
     if (trueDirection == runningDirection) {
       // Nothing to trade on. The record of what opened the bot is pure
@@ -7362,6 +7380,27 @@ class EngineService {
       // the latest event, re-read every cycle until something newer prints,
       // would close-then-reopen the exact same bot forever.
       final isSameOpeningEvent = entry.openedBy(confirmedEvent);
+      // tradingMT5's Update: a same-direction signal on a genuinely newer bar
+      // than both the opening event and the Update already recorded.
+      if (decision.action == Worm10Action.update &&
+          !isSameOpeningEvent &&
+          confirmedEvent.time > entry.entryTime) {
+        final at = DateTime.fromMillisecondsSinceEpoch(
+          confirmedEvent.time * 1000,
+        );
+        final rec = entrySignalStore.recordFor(existing.buOrderId);
+        if (rec != null && rec.update?.at != at) {
+          entrySignalStore.recordUpdate(
+            existing.buOrderId,
+            at: at,
+            type: confirmedEvent.kind.name,
+          );
+          logger.log(
+            'WORM10 UPDATE $symbol: ${confirmedEvent.kind.name}@${confirmedEvent.time} '
+            '(same direction as the running bot).',
+          );
+        }
+      }
       final actsOnClose =
           decision.action == Worm10Action.recycle ||
           decision.action == Worm10Action.flip;

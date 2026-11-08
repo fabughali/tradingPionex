@@ -50,6 +50,7 @@ class EntrySignalRecord {
     required this.base,
     required this.direction,
     required this.open,
+    this.update,
     this.close,
   });
 
@@ -59,6 +60,10 @@ class EntrySignalRecord {
   /// `GridDirection.wireValue`.
   final String direction;
   final EntrySignalMoment open;
+
+  /// The latest same-direction signal while the bot runs (tradingMT5's
+  /// "Update"): a genuinely newer bar than the opening one.
+  final EntrySignalMoment? update;
 
   /// Only ever set for a genuine opposite-signal auto-close - every other
   /// close reason (real Pionex TP/SL, liquidation, manual cancel, the
@@ -70,6 +75,15 @@ class EntrySignalRecord {
     base: base,
     direction: direction,
     open: open,
+    update: update,
+    close: close,
+  );
+
+  EntrySignalRecord withUpdate(EntrySignalMoment update) => EntrySignalRecord(
+    base: base,
+    direction: direction,
+    open: open,
+    update: update,
     close: close,
   );
 
@@ -80,6 +94,11 @@ class EntrySignalRecord {
         open: EntrySignalMoment.fromJson(
           (json['open'] as Map).cast<String, dynamic>(),
         ),
+        update: json['update'] == null
+            ? null
+            : EntrySignalMoment.fromJson(
+                (json['update'] as Map).cast<String, dynamic>(),
+              ),
         close: json['close'] == null
             ? null
             : EntrySignalMoment.fromJson(
@@ -91,6 +110,7 @@ class EntrySignalRecord {
     'base': base,
     'direction': direction,
     'open': open.toJson(),
+    if (update != null) 'update': update!.toJson(),
     if (close != null) 'close': close!.toJson(),
   };
 }
@@ -168,6 +188,14 @@ class EntrySignalStore {
     _byBotId[buOrderId] = existing.withClose(
       EntrySignalMoment(at: at, type: type, zone: zone, value: value),
     );
+    _persist();
+  }
+
+  /// Records the latest same-direction signal on a running bot.
+  void recordUpdate(String buOrderId, {required DateTime at, required String type}) {
+    final existing = _byBotId[buOrderId];
+    if (existing == null) return;
+    _byBotId[buOrderId] = existing.withUpdate(EntrySignalMoment(at: at, type: type));
     _persist();
   }
 

@@ -189,6 +189,33 @@ class EngineControlRepository {
     return entrySignals.recordFor(buOrderId);
   }
 
+  /// tradingMT5's Close A / Close B for a running auto bot: the engine's
+  /// confirmed signal that points AGAINST the bot and is waiting out its
+  /// extra candle (`worm10-gate.json`) - [kind]/[barTime] is Close A, [eta]
+  /// (bar time + 2 candles) is when Close B resolves it (close + flip).
+  /// Null when nothing opposing is pending.
+  ({String kind, DateTime barTime, DateTime eta})? closeCandidateFor(GridBot bot) {
+    final trend = bot.trend;
+    if (trend == null) return null;
+    final gate = _storage.readJsonObject(_storage.worm10GateFile);
+    final base = bot.base.toUpperCase().replaceAll(RegExp(r'\.PERP$'), '');
+    final pending =
+        (gate?['$base.PERP/USDT|${AutoCategory.oneHour.wireValue}'] as Map?)?['pending']
+            as Map?;
+    final kind = pending?['type']?.toString();
+    final t = (pending?['time'] as num?)?.toInt();
+    if (kind == null || t == null) return null;
+    final pointsLong = kind == 'buyOpen1' || kind == 'zigzagBuy';
+    if (pointsLong == (trend == GridDirection.long)) return null;
+    return (
+      kind: kind,
+      barTime: DateTime.fromMillisecondsSinceEpoch(t * 1000),
+      eta: DateTime.fromMillisecondsSinceEpoch(
+        (t + AutoCategory.oneHour.candlePeriod.inSeconds * 2) * 1000,
+      ),
+    );
+  }
+
   /// symbol -> [AutoCategory] the user picked via the per-pair "knob" -
   /// written here (by the GUI), read by the running engine.
   final PairCategoryStore pairCategories;
