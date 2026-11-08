@@ -76,27 +76,43 @@ class WaitingBasesView extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Wrap(
-            crossAxisAlignment: WrapCrossAlignment.center,
-            spacing: 6,
-            runSpacing: 6,
-            children: [
-              Text('Waiting:', style: Theme.of(context).textTheme.bodyMedium),
-              for (final w in waiting)
-                _WaitingChip(
-                  label:
-                      '${w.base}USDT/${w.category.label}/'
-                      '${UtilString.usd(w.investment)}',
-                  onStop: onStop == null ? null : () => onStop!(w.base, w.category),
-                  onIgnite: onIgnite == null
-                      ? null
-                      : () => onIgnite!(w.base, w.category),
-                  igniting: isIgniting?.call(w.base, w.category) ?? false,
-                  thunderDisabled:
-                      anyIgniteInFlight &&
-                      !(isIgniting?.call(w.base, w.category) ?? false),
-                ),
-            ],
+          Text(
+            'Waiting (unfilled): ${waiting.length}',
+            style: Theme.of(context).textTheme.titleSmall,
+          ),
+          const SizedBox(height: 6),
+          // tradingMT5-style waiting cards.
+          LayoutBuilder(
+            builder: (context, constraints) {
+              const gap = 12.0;
+              final n = (constraints.maxWidth / 290).floor().clamp(1, 4);
+              final cardWidth = (constraints.maxWidth - gap * (n - 1)) / n;
+              return Wrap(
+                spacing: gap,
+                runSpacing: gap,
+                children: [
+                  for (final w in waiting)
+                    SizedBox(
+                      width: cardWidth,
+                      child: _WaitingCard(
+                        symbol: '${w.base}USDT',
+                        category: w.category.label,
+                        investment: UtilString.usd(w.investment),
+                        onStop: onStop == null
+                            ? null
+                            : () => onStop!(w.base, w.category),
+                        onIgnite: onIgnite == null
+                            ? null
+                            : () => onIgnite!(w.base, w.category),
+                        igniting: isIgniting?.call(w.base, w.category) ?? false,
+                        thunderDisabled:
+                            anyIgniteInFlight &&
+                            !(isIgniting?.call(w.base, w.category) ?? false),
+                      ),
+                    ),
+                ],
+              );
+            },
           ),
           // Per the user (2026-09-11): "i want waiting status ALWAYS visible
           // if waiting list is visible" - always shows a line whenever
@@ -148,120 +164,114 @@ class WaitingBasesView extends StatelessWidget {
   }
 }
 
-/// Same pill styling `ReuseChip`'s warning tone uses, but with the stop
-/// control built INSIDE the pill itself - a small circular X, separated
-/// from the label by a gap (2026-09-15, per the user: "if you want to keep
-/// x then make it inside each card and inside a circle with a space in
-/// between", after an earlier version placed the X outside the chip).
-class _WaitingChip extends StatelessWidget {
-  const _WaitingChip({
-    required this.label,
+/// tradingMT5's waiting card: symbol, state badge, reason, controls.
+class _WaitingCard extends StatelessWidget {
+  const _WaitingCard({
+    required this.symbol,
+    required this.category,
+    required this.investment,
     this.onStop,
     this.onIgnite,
     this.igniting = false,
     this.thunderDisabled = false,
   });
 
-  final String label;
+  final String symbol;
+  final String category;
+  final String investment;
   final VoidCallback? onStop;
   final VoidCallback? onIgnite;
-
-  /// Shows a small spinner in place of the bolt icon while true, and
-  /// disables the tap so a second click can't fire mid-request
-  /// (2026-09-15, per the user).
   final bool igniting;
-
-  /// True when SOME OTHER chip is igniting right now (2026-09-15, per the
-  /// user) - greys this chip's thunder out and disables its tap, since
-  /// only one ignite can actually use the shared chart at a time. Never
-  /// true at the same time as [igniting] (that one shows the spinner
-  /// instead).
   final bool thunderDisabled;
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final foreground = scheme.onTertiaryContainer;
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final muted = theme.textTheme.bodySmall?.copyWith(color: scheme.outline);
     return Container(
-      padding: EdgeInsets.only(
-        left: onIgnite == null ? 10 : 4,
-        right: onStop == null ? 10 : 4,
-        top: 4,
-        bottom: 4,
-      ),
+      padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: scheme.tertiaryContainer,
-        borderRadius: BorderRadius.circular(999),
+        color: scheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: scheme.outlineVariant),
       ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          if (onIgnite != null) ...[
-            Tooltip(
-              message: igniting
-                  ? 'Igniting...'
-                  : thunderDisabled
-                        ? 'Another pair is igniting - wait for it to finish.'
-                        : 'Ignite now - open this base immediately, without '
-                              'waiting for the normal signal confirmation.',
-              child: InkWell(
-                customBorder: const CircleBorder(),
-                onTap: (igniting || thunderDisabled) ? null : onIgnite,
-                child: Container(
-                  padding: const EdgeInsets.all(2),
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: foreground.withValues(
-                      alpha: thunderDisabled ? 0.06 : 0.16,
-                    ),
+          Row(
+            children: [
+              Flexible(
+                child: Text(
+                  symbol,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w600,
                   ),
+                ),
+              ),
+              Container(
+                margin: const EdgeInsets.only(left: 6),
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                decoration: BoxDecoration(
+                  color: scheme.tertiaryContainer,
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: Text(
+                  'WAITING',
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.bold,
+                    color: scheme.onTertiaryContainer,
+                  ),
+                ),
+              ),
+              const Spacer(),
+              if (onIgnite != null)
+                Tooltip(
+                  message: igniting
+                      ? 'Filling...'
+                      : thunderDisabled
+                      ? 'Another pair is filling - wait for it to finish.'
+                      : 'Fill now on the current signal.',
                   child: igniting
-                      ? SizedBox(
-                          width: 12,
-                          height: 12,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 1.6,
-                            color: foreground,
+                      ? const Padding(
+                          padding: EdgeInsets.all(10),
+                          child: SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
                           ),
                         )
-                      : Icon(
-                          Icons.bolt,
-                          size: 12,
-                          color: thunderDisabled
-                              ? foreground.withValues(alpha: 0.35)
-                              : foreground,
+                      : IconButton(
+                          icon: const Icon(Icons.bolt, size: 20),
+                          visualDensity: VisualDensity.compact,
+                          onPressed: thunderDisabled ? null : onIgnite,
                         ),
                 ),
-              ),
+              if (onStop != null)
+                IconButton(
+                  icon: const Icon(Icons.close, size: 18),
+                  tooltip: 'Remove from waiting.',
+                  visualDensity: VisualDensity.compact,
+                  onPressed: onStop,
+                ),
+            ],
+          ),
+          Text('$category · investment $investment', style: muted),
+          const SizedBox(height: 8),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: scheme.surfaceContainerHighest.withValues(alpha: 0.5),
+              borderRadius: BorderRadius.circular(8),
             ),
-            const SizedBox(width: 6),
-          ],
-          Text(
-            label,
-            style: Theme.of(context).textTheme.labelSmall?.copyWith(
-              color: foreground,
-              fontWeight: FontWeight.w600,
+            child: Text(
+              'Waiting for the hybrid decision to open it.',
+              style: theme.textTheme.bodySmall,
             ),
           ),
-          if (onStop != null) ...[
-            const SizedBox(width: 6),
-            Tooltip(
-              message: 'Stop this base - remove it from auto-management, '
-                  'no more retry attempts.',
-              child: InkWell(
-                customBorder: const CircleBorder(),
-                onTap: onStop,
-                child: Container(
-                  padding: const EdgeInsets.all(2),
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: foreground.withValues(alpha: 0.16),
-                  ),
-                  child: Icon(Icons.close, size: 11, color: foreground),
-                ),
-              ),
-            ),
-          ],
         ],
       ),
     );

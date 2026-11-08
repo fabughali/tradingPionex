@@ -46,7 +46,11 @@ class GridsTable extends StatefulWidget {
     this.cycleMarkerFor,
     this.entrySignalFor,
     this.closeCandidateFor,
+    this.asCards = false,
   });
+
+  /// tradingMT5-style running cards instead of the table (Auto bots).
+  final bool asCards;
 
   final List<GridBot> grids;
   final bool busy;
@@ -361,6 +365,20 @@ class _GridsTableState extends State<GridsTable> {
               spacing: CoreSpacing.sm,
               runSpacing: CoreSpacing.sm,
               children: [
+                if (widget.asCards)
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Checkbox(
+                        value: grids.isNotEmpty &&
+                            _selected.length == grids.length,
+                        onChanged: (v) => v == true
+                            ? _selectAll()
+                            : setState(_selected.clear),
+                      ),
+                      const Text('Select all'),
+                    ],
+                  ),
                 if (widget.onBulkConvertToAuto != null)
                   ReuseButton(
                     label: 'Convert to Auto',
@@ -427,6 +445,27 @@ class _GridsTableState extends State<GridsTable> {
             ),
             const SizedBox(height: CoreSpacing.sm),
           ],
+          if (widget.asCards)
+            LayoutBuilder(
+              builder: (context, constraints) {
+                const gap = 12.0;
+                final w = constraints.maxWidth;
+                final n = (w / 330).floor().clamp(1, 4);
+                final cardWidth = (w - gap * (n - 1)) / n;
+                return Wrap(
+                  spacing: gap,
+                  runSpacing: gap,
+                  children: [
+                    for (final g in grids)
+                      SizedBox(
+                        width: cardWidth,
+                        child: _buildCard(g, trading),
+                      ),
+                  ],
+                );
+              },
+            )
+          else
           ReuseDataTable(
             showCheckboxColumn: _hasBulkActions,
             // Select-all now lives only in the table's own header checkbox
@@ -664,6 +703,309 @@ class _GridsTableState extends State<GridsTable> {
                 : null,
           ),
       ],
+    );
+  }
+
+  /// tradingMT5's running card, filled with this bot's Pionex fields.
+  Widget _buildCard(GridBot g, TradingColors trading) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final category = widget.categoryOf?.call(g.buOrderId);
+    final bareBase = g.base
+        .toUpperCase()
+        .replaceAll(RegExp(r'\.PERP$', caseSensitive: false), '');
+    final record = widget.entrySignalFor?.call(g.buOrderId);
+    final candidate = widget.closeCandidateFor?.call(g);
+    final muted = theme.textTheme.bodySmall?.copyWith(color: scheme.outline);
+    String p(double? v) => (v == null || v == 0) ? '—' : UtilString.price(v);
+    String usd(double? v) => v == null ? '—' : UtilString.usd(v);
+
+    Widget badge(String text, Color bg, Color fg) => Container(
+      margin: const EdgeInsets.only(left: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: Text(
+        text,
+        style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: fg),
+      ),
+    );
+
+    Widget kv(String k, String v, {Color? color}) => Padding(
+      padding: const EdgeInsets.only(bottom: 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(k, style: muted),
+          Text(
+            v,
+            style: theme.textTheme.bodyMedium?.copyWith(
+              color: color,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+        ],
+      ),
+    );
+
+    Widget sig(String label, String value, {Color? color}) => Padding(
+      padding: const EdgeInsets.only(top: 2),
+      child: Row(
+        children: [
+          SizedBox(
+            width: 64,
+            child: Text(label, style: muted?.copyWith(color: color)),
+          ),
+          Expanded(
+            child: Text(
+              value,
+              style: theme.textTheme.bodySmall?.copyWith(color: color),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    final long = g.trend == GridDirection.long;
+    final profit = g.profitAmount;
+    final pct = g.profitPercent;
+    final pnlColor = profit == null
+        ? null
+        : (profit >= 0 ? trading.profit : trading.loss);
+    final selected = _selected.contains(g.buOrderId);
+    final pending = _pendingAction.contains(g.buOrderId);
+
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: selected ? scheme.primary : scheme.outlineVariant,
+          width: selected ? 1.5 : 1,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              if (_hasBulkActions)
+                SizedBox(
+                  width: 28,
+                  height: 28,
+                  child: Checkbox(
+                    value: selected,
+                    onChanged: pending
+                        ? null
+                        : (v) => setState(
+                            () => v == true
+                                ? _selected.add(g.buOrderId)
+                                : _selected.remove(g.buOrderId),
+                          ),
+                  ),
+                ),
+              Flexible(
+                child: InkWell(
+                  onTap: () => context.push('/bot-details', extra: g),
+                  child: Text(
+                    g.pairKey,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ),
+              if (g.trend != null)
+                badge(
+                  long ? 'LONG' : 'SHORT',
+                  (long ? trading.profit : trading.loss).withValues(alpha: 0.15),
+                  long ? trading.profit : trading.loss,
+                ),
+              if (g.leverage != null)
+                badge(
+                  '${g.leverage!.toStringAsFixed(0)}x',
+                  scheme.outline.withValues(alpha: 0.15),
+                  scheme.outline,
+                ),
+              const Spacer(),
+              IconButton(
+                icon: const Icon(Icons.settings_outlined, size: 20),
+                tooltip: 'More',
+                visualDensity: VisualDensity.compact,
+                onPressed: () => showBotActionsMenu(context, bot: g),
+              ),
+            ],
+          ),
+          Text(
+            '#${g.buOrderId} · ${category?.label ?? '1H'} · '
+            'lasting ${_formatDuration(g.duration)} · ${g.status}',
+            style: muted,
+          ),
+          if (_isLastMarked(bareBase, category) ||
+              widget.stopLossLockedIds.contains(g.buOrderId))
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Wrap(
+                spacing: 6,
+                runSpacing: 4,
+                children: [
+                  if (_isLastMarked(bareBase, category))
+                    _tagChip(
+                      label: 'Last',
+                      background: scheme.errorContainer,
+                      onBackground: scheme.onErrorContainer,
+                      switchColor: trading.loss,
+                      tooltip:
+                          'Last active — will finish naturally '
+                          'and never auto-recreate. Toggle off to cancel.',
+                      spinning: widget.cancelLastActiveRowId == g.buOrderId,
+                      busy: widget.busy,
+                      onToggleOff: () => widget.onCancelLast?.call(g),
+                    ),
+                  if (widget.stopLossLockedIds.contains(g.buOrderId))
+                    _tagChip(
+                      label: 'SL Lock',
+                      background: scheme.primaryContainer,
+                      onBackground: scheme.onPrimaryContainer,
+                      switchColor: scheme.primary,
+                      tooltip:
+                          'Stop Loss Lock active. Toggle off to disable.',
+                      spinning:
+                          widget.cancelStopLossLockActiveRowId == g.buOrderId,
+                      busy: widget.busy,
+                      onToggleOff: () => widget.onCancelStopLossLock?.call(g),
+                    ),
+                ],
+              ),
+            ),
+          const SizedBox(height: 8),
+          Container(
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: scheme.surfaceContainerHighest.withValues(alpha: 0.5),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('Investment', style: muted),
+                      Text(
+                        usd(g.initialInvestment),
+                        style: theme.textTheme.titleMedium,
+                      ),
+                      Text('actual ${usd(g.actualInvestment)}', style: muted),
+                    ],
+                  ),
+                ),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      Text('P&L', style: muted),
+                      Text(
+                        profit == null
+                            ? '—'
+                            : '${profit >= 0 ? '+' : ''}${UtilString.usd(profit)}',
+                        style: theme.textTheme.titleMedium?.copyWith(
+                          color: pnlColor,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      if (pct != null)
+                        Text(
+                          '${pct >= 0 ? '+' : ''}${pct.toStringAsFixed(1)}%',
+                          style: muted?.copyWith(color: pnlColor),
+                        ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 8),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    kv('Price now', p(g.currentPrice)),
+                    kv('Liquidation', p(g.liquidationPrice), color: trading.loss),
+                  ],
+                ),
+              ),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    kv('TP', p(g.takeProfitPrice), color: trading.profit),
+                    kv('SL', p(g.stopLossPrice), color: trading.loss),
+                  ],
+                ),
+              ),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    kv('Extra margin', usd(g.extraMargin)),
+                    kv(
+                      'Grids',
+                      '${g.row ?? '—'} · ${g.widenApplied ? '40/60' : 'Neutral'}',
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          kv(
+            'Range',
+            (g.bottom == null || g.top == null)
+                ? '—'
+                : '${UtilString.price(g.bottom!)} – ${UtilString.price(g.top!)}',
+          ),
+          const Divider(height: 12),
+          if (record == null && candidate == null)
+            sig('Open', '—')
+          else ...[
+            if (record != null)
+              sig(
+                'Open',
+                '${_eventLabel(record.open.type)} · ${_shortTime(record.open.at)}',
+              ),
+            if (record?.update != null)
+              sig(
+                'Update',
+                '${_eventLabel(record!.update!.type)} · ${_shortTime(record.update!.at)}',
+              ),
+            if (candidate != null) ...[
+              sig(
+                'Close A',
+                '${_eventLabel(candidate.kind)} · ${_shortTime(candidate.barTime)}',
+                color: Colors.orange,
+              ),
+              sig(
+                'Close B',
+                'watching · ETA ${_shortTime(candidate.eta)}',
+                color: Colors.orange,
+              ),
+            ],
+            if (record?.close != null)
+              sig(
+                'Closed',
+                '${_eventLabel(record!.close!.type)} · ${_shortTime(record.close!.at)}',
+              ),
+          ],
+        ],
+      ),
     );
   }
 

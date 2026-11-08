@@ -963,6 +963,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                         const Divider(height: CoreSpacing.md),
                         GridsTable(
                       grids: status.grids.appRunning,
+                      asCards: true,
                       // Bug fixed 2026-09-16, per the user: "stop, last,
                       // convert manual, convert auto: all those action
                       // buttons should be disabled once power off" - this
