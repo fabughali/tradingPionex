@@ -248,6 +248,9 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     }
   }
 
+  /// True while Check Now is re-reading Pionex's market list.
+  bool _refreshingMarket = false;
+
   void _notify(String message, {required bool success}) {
     if (!mounted) return;
     final messenger = ScaffoldMessenger.of(context);
@@ -756,11 +759,29 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                     // Check Now reads Pionex only (per the user, 2026-11-08):
                     // it refreshes the market list - no TradingView, no
                     // engine. Signals are read by Start, per selected pair.
-                    checkNowLoading: false,
-                    onCheckNow: () {
-                      ref.invalidate(pionexMarketProvider);
-                      _notify('Pionex list refreshed.', success: true);
-                    },
+                    // Spinner + disabled until Pionex's list is back.
+                    checkNowLoading: _refreshingMarket,
+                    onCheckNow: _refreshingMarket
+                        ? null
+                        : () async {
+                            setState(() => _refreshingMarket = true);
+                            try {
+                              final pairs = await ref.refresh(
+                                pionexMarketProvider.future,
+                              );
+                              _notify(
+                                'Pionex list refreshed — ${pairs.length} pairs.',
+                                success: true,
+                              );
+                            } catch (e) {
+                              _notify('Could not refresh from Pionex: $e',
+                                  success: false);
+                            } finally {
+                              if (mounted) {
+                                setState(() => _refreshingMarket = false);
+                              }
+                            }
+                          },
                     market:
                         ref.watch(pionexMarketProvider).value ?? const [],
 
