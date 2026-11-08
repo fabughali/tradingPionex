@@ -581,6 +581,11 @@ class EngineService {
   /// uses for Check Now.
   bool _pairActionCancelledForAutoCheckup = false;
 
+  /// Pairs Start put in Waiting that still get one fill-now attempt, in
+  /// order. Drained one at a time by [_onPairActionTick] when no pair
+  /// action request is waiting, so a new Start never waits behind fills.
+  final List<String> _fillQueue = [];
+
   /// Non-null only right after a Start request was paused mid-list for an
   /// Auto category - the request's id, the symbols it hadn't reached yet,
   /// and everything opened/skipped so far, so resuming continues exactly
@@ -3547,6 +3552,7 @@ class EngineService {
       final hasWork =
           storage.fileExists(storage.refreshRedListFile) ||
           storage.fileExists(storage.pairActionFile) ||
+          _fillQueue.isNotEmpty ||
           _indicatorRetryPending;
       if (hasWork) {
         final running = _runningAutoCategory;
@@ -3580,7 +3586,10 @@ class EngineService {
     }
     if (_cdp == null) return;
     final req = storage.readJsonObject(storage.pairActionFile);
-    if (req == null) return;
+    if (req == null) {
+      if (_fillQueue.isNotEmpty) await _fillNextQueued();
+      return;
+    }
     storage.deleteFileIfExists(storage.pairActionFile);
     _pairActionRunning = true;
     try {
@@ -3627,6 +3636,42 @@ class EngineService {
           });
         },
       );
+    } finally {
+      _pairActionRunning = false;
+      _resumeWhateverWasPausedForPairAction();
+    }
+  }
+
+  /// One fill-now attempt for the next pair Start put in Waiting. Skipped if
+  /// the pair left Waiting meanwhile (removed, or already running). If it
+  /// can't fill, the pair simply stays in Waiting.
+  Future<void> _fillNextQueued() async {
+    final symbol = _fillQueue.removeAt(0);
+    final base = _baseOf(symbol);
+    final category = pairCategories.categoryOf(symbol);
+    final managed =
+        autoManagedByCategory[category]?.isAutoManaged(base) ?? false;
+    if (!managed || _appGridForKey(_gridKey(base), category) != null) {
+      logger.log('FILL NOW $symbol: skipped - no longer in Waiting.');
+      return;
+    }
+    _pairActionRunning = true;
+    try {
+      final fill = await _pairActionIgnite(symbol).timeout(
+        const Duration(seconds: 120),
+        onTimeout: () {
+          _cdp?.close();
+          _cdp = null;
+          return {'ok': false, 'message': 'timed out after 120s'};
+        },
+      );
+      logger.log(
+        fill['ok'] == true
+            ? 'FILL NOW $symbol: filled. ${fill['message'] ?? ''}'
+            : 'FILL NOW $symbol: not filled, stays in Waiting - ${fill['message']}',
+      );
+    } catch (e) {
+      logger.log('FILL NOW $symbol: error, stays in Waiting - $e');
     } finally {
       _pairActionRunning = false;
       _resumeWhateverWasPausedForPairAction();
@@ -4756,17 +4801,16 @@ class EngineService {
       // just stays in Waiting.
       retired.removeRetiredBases([(base: base, category: pairCategory)]);
       autoManagedByCategory[pairCategory]!.addBase(base);
-      final fill = await _pairActionIgnite(symbol);
-      if (fill['ok'] == true) {
-        opened.add(symbol);
-      } else {
-        skipped[symbol] = 'waiting - ${fill['message']}';
-      }
+      // Start is done once the pair is in Waiting (per the user,
+      // 2026-11-08): the fill itself runs from [_fillQueue], one pair at a
+      // time, so the user can Start more pairs meanwhile.
+      if (!_fillQueue.contains(symbol)) _fillQueue.add(symbol);
+      opened.add(symbol);
     }
     final message = opened.isEmpty
-        ? 'Nothing filled (${skipped.entries.map((e) => '${e.key}: ${e.value}').join('; ')}).'
-        : 'Filling now: ${opened.join(', ')}.'
-              '${skipped.isEmpty ? '' : ' Not filled: ${skipped.entries.map((e) => '${e.key} (${e.value})').join(', ')}.'}';
+        ? 'Nothing added (${skipped.entries.map((e) => '${e.key}: ${e.value}').join('; ')}).'
+        : 'In Waiting, filling now: ${opened.join(', ')}.'
+              '${skipped.isEmpty ? '' : ' Skipped: ${skipped.entries.map((e) => '${e.key} (${e.value})').join(', ')}.'}';
     return {
       'ok': opened.isNotEmpty,
       'opened': opened,
