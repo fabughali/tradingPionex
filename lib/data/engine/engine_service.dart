@@ -7790,6 +7790,9 @@ class EngineService {
     // no separate waiting/baseline bookkeeping left to do here at all.
     if (confirmedEvent == null) {
       logger.log('SKIP $symbol[${category.label}]: no confirmed Worm10 event yet');
+      // Waiting for a signal is not a failed open - no strike (per the user,
+      // 2026-11-08: Waiting waits for the hybrid decision).
+      _lastCreateSkipReason = 'waiting for the hybrid decision';
       return;
     }
 
@@ -7807,6 +7810,7 @@ class EngineService {
         '${confirmedEvent.kind.name}@${confirmedEvent.time} does not open '
         '(no running trade yet - a bare zigzag never opens on its own).',
       );
+      _lastCreateSkipReason = 'waiting for the hybrid decision';
       return;
     }
     if (bypassFreshSignalGate) {
