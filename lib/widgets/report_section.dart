@@ -791,21 +791,14 @@ class _PreviewChecklistState extends State<PreviewChecklist> {
                         width: 48,
                         height: 48,
                         child: Center(
-                          child:
-                              widget.checkupCurrentBase.isNotEmpty &&
-                                  row.base.toUpperCase() ==
-                                      widget.checkupCurrentBase.toUpperCase()
-                              ? const SizedBox(
-                                  width: 18,
-                                  height: 18,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
-                                  ),
-                                )
-                              : Checkbox(
+                          // No row spinner (per the user, 2026-11-08).
+                          child: Checkbox(
+                                  // Any tradable pair can be ticked: Start
+                                  // reads its signal (per the user,
+                                  // 2026-11-08 - Check Now is Pionex-only).
                                   value:
                                       _selected.contains(row.base) &&
-                                      row.entry != null &&
+                                      row.tradable &&
                                       !row.blocked.contains(row.category),
                                   // Always selectable regardless of balance
                                   // - never disabled for that reason.
@@ -831,7 +824,7 @@ class _PreviewChecklistState extends State<PreviewChecklist> {
                                   // (and forced unchecked) the same as the
                                   // no-signal case now.
                                   onChanged:
-                                      (row.entry == null ||
+                                      (!row.tradable ||
                                           row.blocked.contains(row.category))
                                       ? null
                                       : (v) => setState(
@@ -958,11 +951,10 @@ class _PreviewChecklistState extends State<PreviewChecklist> {
                       final selectedRowsAll = rows.where(
                         (r) =>
                             _selected.contains(r.base) &&
+                            r.tradable &&
                             !r.blocked.contains(r.category),
                       );
-                      final totalNeeded = _totalInvestmentFor(
-                        selectedRowsAll.where((r) => r.entry != null),
-                      );
+                      final totalNeeded = _totalInvestmentFor(selectedRowsAll);
                       if (totalNeeded > widget.freeBalance) {
                         setState(_selected.clear);
                         ScaffoldMessenger.of(context)
@@ -991,39 +983,10 @@ class _PreviewChecklistState extends State<PreviewChecklist> {
                       // that broke chart lookups, since it can't be
                       // trusted to match what TradingView actually listed
                       // it as.
-                      final selectedSymbols = selectedRowsAll
-                          .where((r) => r.entry != null)
-                          .map((r) => r.symbol)
-                          .toList();
-                      // Bug fixed 2026-09-10: a selected pair with no live
-                      // signal for its currently-displayed category (
-                      // `r.entry == null`) used to be dropped from the
-                      // Start request with zero feedback - looked exactly
-                      // like "I selected 6, only 5 got created" with no way
-                      // to tell why the 6th never even reached the engine.
-                      final droppedBases = selectedRowsAll
-                          .where((r) => r.entry == null)
-                          .map((r) => r.base)
-                          .toList();
-                      if (droppedBases.isNotEmpty) {
-                        ScaffoldMessenger.of(context)
-                          ..hideCurrentSnackBar()
-                          ..showSnackBar(
-                            SnackBar(
-                              content: Text(
-                                '${droppedBases.join(', ')} - no live signal '
-                                'on the currently-shown interval, so '
-                                '${droppedBases.length == 1 ? 'it was' : 'they were'} '
-                                'left out of this Start. Switch to a category '
-                                'with a signal and try again if you meant to '
-                                'include ${droppedBases.length == 1 ? 'it' : 'them'}.',
-                              ),
-                              backgroundColor: Theme.of(
-                                context,
-                              ).colorScheme.error,
-                            ),
-                          );
-                      }
+                      // Every ticked tradable pair goes to Start, which reads
+                      // its signal and opens only on a confirmed one.
+                      final selectedSymbols =
+                          selectedRowsAll.map((r) => r.symbol).toList();
                       if (selectedSymbols.isEmpty) return;
                       // Bug fixed 2026-09-11, per the user ("I select 1 now
                       // but it shows 6"): unlike a row that disappears after

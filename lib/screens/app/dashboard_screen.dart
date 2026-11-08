@@ -268,13 +268,6 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   /// the persistent "Report" section picks up the fresh
   /// `LastReport.generatedAtMs`/entries the moment the sweep actually
   /// finishes, with no extra plumbing needed here.
-  /// The tradable pairs the Check Now table is showing, in its order - what
-  /// Check Now reads (reported by the table on every build).
-  List<String> _visibleCheckNowSymbols = const [];
-
-  void _performCheckNow(EngineControlRepository repo) {
-    repo.checkNow();
-  }
 
   /// Power ON: verifies both external connections actually work (auto-
   /// launching TradingView Desktop if it isn't up - see
@@ -462,15 +455,6 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
           // paused mid-way through) an actual Check Now/Start pass over the
           // Red list, so it's the one true signal for this button/status.
           final checkupRunning = status.engineStatus.checkupPairTotal > 0;
-          // Per the user (2026-09-05): Check Now/Refresh specifically must
-          // stay inactive until Power's own status genuinely reads "Ready"
-          // - not just "the engine process happens to be alive" - since
-          // both need a real, verified TradingView connection to do
-          // anything useful. Deliberately NOT applied to Stop/Last-selected
-          // (those are plain Pionex API calls with no TradingView
-          // dependency at all, so gating them on chart health would be an
-          // unrelated over-restriction).
-          final powerReady = status.engineStatus.lastCycleMessage == 'Ready';
           final powerHealth = ReuseStatusLight.evaluatePower(
             status,
             isEngineProcessAlive: powerDisplayAlive,
@@ -769,33 +753,16 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                     // responsible for the full Red-list check, so it
                     // belongs with the pairs data it produces, not under
                     // Power/Quick Actions.
-                    checkNowLoading:
-                        _activeAction == 'checknow' || checkupRunning,
-                    onCheckNow:
-                        (_actionsBlocked(status, engineProcessAlive) ||
-                            checkupRunning ||
-                            !powerReady)
-                        ? null
-                        : () => _run(
-                            'checknow',
-                            () async {
-                              repo.setCheckNowPairs(
-                                _visibleCheckNowSymbols,
-                                newRound: true,
-                              );
-                              _performCheckNow(repo);
-                            },
-                            successMessage:
-                                'Check started — reading the ${_visibleCheckNowSymbols.length} tradable pairs shown, in the table\'s order.',
-                          ),
+                    // Check Now reads Pionex only (per the user, 2026-11-08):
+                    // it refreshes the market list - no TradingView, no
+                    // engine. Signals are read by Start, per selected pair.
+                    checkNowLoading: false,
+                    onCheckNow: () {
+                      ref.invalidate(pionexMarketProvider);
+                      _notify('Pionex list refreshed.', success: true);
+                    },
                     market:
                         ref.watch(pionexMarketProvider).value ?? const [],
-                    // Stored without setState: only read when a button is
-                    // pressed.
-                    onVisibleSymbols: (symbols) =>
-                        _visibleCheckNowSymbols = symbols,
-                    // Show more only shows more rows - nothing is checked
-                    // until Check Now is pressed (per the user, 2026-11-07).
 
                     // Per the user (2026-09-05, correcting an earlier
                     // misreading): Start is an on-spot check of ONLY the
