@@ -6239,6 +6239,10 @@ class EngineService {
 
   bool _sllRunning = false;
 
+  /// Last time a still-failing booked top-up was logged, per bot (once a
+  /// minute, not every 5s).
+  final Map<String, DateTime> _sllOwedLoggedAt = {};
+
   /// The investment a top-up is expected to reach, and when it was sent -
   /// no further top-up on that bot until Pionex reports it (or 60s pass),
   /// so a stale read can never move the same money twice.
@@ -6251,20 +6255,75 @@ class EngineService {
         .toUpperCase()
         .replaceAll(RegExp(r'\.PERP$', caseSensitive: false), '');
 
-    // 1. A trade starts with TP and SL blank (once per bot).
-    if (!stopLossLockState.cleared(id)) {
+    // 1. Start of the trade, once per bot (per the user, 2026-11-09): TP at
+    //    the range top for a long / bottom for a short, then never touched;
+    //    SL blank until the $50 lock. An SL that SLL already locked is kept.
+    if (!stopLossLockState.started(id)) {
+      final tp = switch (bot.trend) {
+        GridDirection.long => bot.top,
+        GridDirection.short => bot.bottom,
+        null => null,
+      };
+      if (tp == null) {
+        logger.log(
+          'SLL ${bot.pairKey} ($id): direction or range not known yet - '
+          'setting TP on the next pass.',
+        );
+        return;
+      }
+      final keepLock = stopLossLockState.lockedUsd(id) != null;
       await pionex.updateTriggerProfitLoss(
         buOrderId: id,
         profitStopType: 'price',
-        profitStopValue: '',
-        lossStopType: 'profit_ratio',
-        lossStopValue: '',
+        profitStopValue: '$tp',
+        lossStopType: keepLock ? null : 'profit_amount',
+        lossStopValue: keepLock ? null : '',
       );
-      stopLossLockState.markCleared(id);
-      logger.log('SLL ${bot.pairKey} ($id): TP and SL cleared - SLL is in charge.');
+      stopLossLockState.markStarted(id);
+      logger.log(
+        'SLL ${bot.pairKey} ($id): TP set to $tp (${bot.trend!.wireValue} range '
+        'edge)${keepLock ? '' : ', SL blank'}.',
+      );
     }
 
     final price = await pionex.getTickerPrice('${bareBase}_USDT_PERP');
+
+    // A top-up whose add-investment step failed: the money is still booked
+    // for this bot and is retried every pass until it is added (per the
+    // user, 2026-11-09). No new top-up until then.
+    final owed = stopLossLockState.owed(id);
+    if (owed != null && owed > 0) {
+      if (price == null) return;
+      try {
+        await pionex.investInFuturesGrid(
+          buOrderId: id,
+          openPrice: price,
+          quoteInvestment: owed,
+        );
+        stopLossLockState.setOwed(id, 0);
+        _sllPendingTopUp[id] = (
+          expectedActual: (bot.actualInvestment ?? 0) + owed,
+          at: DateTime.now(),
+        );
+        logger.log(
+          'SLL ${bot.pairKey} ($id): booked \$${owed.toStringAsFixed(2)} added to '
+          'the investment on retry.',
+        );
+      } catch (e) {
+        final last = _sllOwedLoggedAt[id];
+        if (last == null ||
+            DateTime.now().difference(last) > const Duration(minutes: 1)) {
+          _sllOwedLoggedAt[id] = DateTime.now();
+          logger.log(
+            'SLL ${bot.pairKey} ($id): booked \$${owed.toStringAsFixed(2)} still '
+            'not added to the investment ($e) - retrying every 5s.',
+            level: 'ERROR',
+          );
+        }
+      }
+      return;
+    }
+
     final live = bot.copyWith(currentPrice: price);
     final profit = live.profitAmount;
     final pct = live.profitPercent;
@@ -6289,26 +6348,37 @@ class EngineService {
       }
     }
 
-    // 3. P&L >= $50: lock SL at P&L - $20 ($10 steps), only ever up.
+    // 3. P&L >= $50: SL at P&L - $20 ($10 steps), only ever up. Set on
+    //    Pionex as a $ trigger (`profit_amount`, the same type the gear
+    //    menu's TP/SL editor uses for P&L in $), per the user.
     final stored = stopLossLockState.lockedUsd(id);
     final fresh = sllLockUsd(profit);
-    final target = fresh == null
-        ? stored
-        : (stored == null || fresh > stored ? fresh : stored);
-    if (target == null) return;
-    final ratio = double.parse((target / actual).toStringAsFixed(4));
-    final sent = stopLossLockState.sentRatio(id);
-    if (stored != null && target <= stored && sent == ratio) return;
-    await pionex.updateTriggerProfitLoss(
-      buOrderId: id,
-      lossStopType: 'profit_ratio',
-      lossStopValue: ratio.toStringAsFixed(4),
-    );
-    stopLossLockState.recordLock(id, target, ratio);
+    if (fresh == null || (stored != null && fresh <= stored)) return;
+    try {
+      await pionex.updateTriggerProfitLoss(
+        buOrderId: id,
+        lossStopType: 'profit_amount',
+        lossStopValue: fresh.toStringAsFixed(2),
+      );
+    } catch (e) {
+      // Never leave the bot without its lock: if Pionex refuses the $
+      // trigger, set the same amount as % of the actual investment.
+      final ratio = fresh / actual;
+      logger.log(
+        'SLL ${bot.pairKey} ($id): Pionex refused the \$ SL trigger ($e) - set '
+        'it as ${(ratio * 100).toStringAsFixed(1)}% of P&L instead.',
+        level: 'CRITICAL',
+      );
+      await pionex.updateTriggerProfitLoss(
+        buOrderId: id,
+        lossStopType: 'profit_ratio',
+        lossStopValue: ratio.toStringAsFixed(4),
+      );
+    }
+    stopLossLockState.recordLock(id, fresh);
     logger.log(
-      'SLL ${bot.pairKey} ($id): P&L=\$${profit.toStringAsFixed(2)} - SL locks '
-      '+\$${target.toStringAsFixed(0)} (${(ratio * 100).toStringAsFixed(1)}% of '
-      '\$${actual.toStringAsFixed(2)} actual investment).',
+      'SLL ${bot.pairKey} ($id): P&L=\$${profit.toStringAsFixed(2)} - SL set to '
+      '+\$${fresh.toStringAsFixed(0)}.',
     );
   }
 
@@ -6337,21 +6407,14 @@ class EngineService {
         quoteInvestment: amount,
       );
     } catch (e) {
+      // Per the user (2026-11-09): the money stays booked for this bot and
+      // is retried every pass until it is added - never put back as margin.
+      stopLossLockState.setOwed(id, amount);
       logger.log(
-        'SLL ${bot.pairKey} ($id): investing \$$amount failed ($e) - putting it '
-        'back as extra margin.',
+        'SLL ${bot.pairKey} ($id): adding \$${amount.toStringAsFixed(2)} to the '
+        'investment failed ($e) - kept booked for this bot, retrying every 5s.',
         level: 'ERROR',
       );
-      try {
-        await pionex.addMargin(buOrderId: id, amount: amount);
-      } catch (e2) {
-        logger.log(
-          'SLL ${bot.pairKey} ($id): could not put \$$amount back as margin '
-          '($e2) - it is in the free balance.',
-          level: 'CRITICAL',
-        );
-      }
-      _sllPendingTopUp[id] = (expectedActual: actual + 1e9, at: DateTime.now());
       return;
     }
     _sllPendingTopUp[id] = (

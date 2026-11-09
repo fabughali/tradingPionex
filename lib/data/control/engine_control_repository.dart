@@ -442,7 +442,10 @@ class EngineControlRepository {
     final bookedForWaiting = waitingBases(
       grids.appRunning,
     ).fold(0.0, (sum, w) => sum + w.investment);
-    final availableBalance = (bal.free - bookedForWaiting)
+    // SLL top-ups taken out of a bot's margin but not yet added to its
+    // investment stay booked for that bot (per the user, 2026-11-09).
+    final bookedForTopUps = sllBookedTopUps();
+    final availableBalance = (bal.free - bookedForWaiting - bookedForTopUps)
         .clamp(0, double.infinity)
         .toDouble();
     return StatusReport(
@@ -596,6 +599,23 @@ class EngineControlRepository {
 
   /// Whether the user has Power on (see [CoreStorage.powerOnFile]).
   bool get isPowerOn => _storage.fileExists(_storage.powerOnFile);
+
+  /// USDT the engine's SLL took out of bots' margin for a top-up that is not
+  /// yet added to their investment (`owed` in the SLL state file) - booked,
+  /// so it is never counted as free for new trades.
+  double sllBookedTopUps() {
+    try {
+      final raw =
+          _storage.readJsonObject(_storage.stopLossLockStateFile) ?? const {};
+      var sum = 0.0;
+      for (final v in raw.values) {
+        if (v is Map && v['owed'] is num) sum += (v['owed'] as num).toDouble();
+      }
+      return sum;
+    } catch (_) {
+      return 0;
+    }
+  }
 
   /// Power ON succeeded: remember it, so the watchdog keeps the engine up.
   void markPowerOn() => _storage.touchFile(_storage.powerOnFile);
