@@ -6354,6 +6354,8 @@ class EngineService {
     final stored = stopLossLockState.lockedUsd(id);
     final fresh = sllLockUsd(profit);
     if (fresh == null || (stored != null && fresh <= stored)) return;
+    // $ trigger only (per the user) - if Pionex refuses it, nothing else is
+    // tried; the lock is not recorded, so the next pass tries again.
     try {
       await pionex.updateTriggerProfitLoss(
         buOrderId: id,
@@ -6361,19 +6363,12 @@ class EngineService {
         lossStopValue: fresh.toStringAsFixed(2),
       );
     } catch (e) {
-      // Never leave the bot without its lock: if Pionex refuses the $
-      // trigger, set the same amount as % of the actual investment.
-      final ratio = fresh / actual;
       logger.log(
-        'SLL ${bot.pairKey} ($id): Pionex refused the \$ SL trigger ($e) - set '
-        'it as ${(ratio * 100).toStringAsFixed(1)}% of P&L instead.',
+        'SLL ${bot.pairKey} ($id): Pionex refused the \$${fresh.toStringAsFixed(0)} '
+        'SL trigger ($e) - trying again next pass.',
         level: 'CRITICAL',
       );
-      await pionex.updateTriggerProfitLoss(
-        buOrderId: id,
-        lossStopType: 'profit_ratio',
-        lossStopValue: ratio.toStringAsFixed(4),
-      );
+      return;
     }
     stopLossLockState.recordLock(id, fresh);
     logger.log(
