@@ -33,7 +33,7 @@ import '../models/running_bots_report.dart';
 import '../models/range_result.dart';
 import '../pionex/pionex_client.dart';
 import '../risk/risk_gate.dart';
-import 'tp_sl_ladder.dart';
+import 'sll_rules.dart';
 import '../technique/grid_count.dart';
 import '../technique/liquidation.dart';
 import '../technique/shrink_retry.dart';
@@ -647,13 +647,10 @@ class EngineService {
       const Duration(minutes: 5),
       (_) => unawaited(_reconcilePnlSettlement()),
     );
+    // Stop Loss Lock - every 5 seconds (per the user, 2026-11-09).
     _tpSlRatchetTimer = Timer.periodic(
-      Duration(seconds: config.pollIntervalSec),
-      (_) => unawaited(_runTpSlRatchetSweep()),
-    );
-    _stopLossLockTimer = Timer.periodic(
-      const Duration(minutes: 3),
-      (_) => unawaited(_runStopLossLockSweep()),
+      const Duration(seconds: 5),
+      (_) => unawaited(_runSllSweep()),
     );
     _neverFilledCheckTimer = Timer.periodic(
       const Duration(minutes: 3),
@@ -1407,11 +1404,11 @@ class EngineService {
     // unfilterable as "SLL" in History). Read before
     // `stopLossLockState.forget(buOrderId)` ever runs for this bot - every
     // call site records history before cleaning up that state.
-    final lockedSl = stopLossLockState.lockedSlPercent(buOrderId);
+    final lockedSl = stopLossLockState.lockedUsd(buOrderId);
     final ratcheted = tpSlRatchet.highestThreshold(buOrderId) > 0;
     return switch (reasonBy) {
       'loss_stop' => lockedSl != null
-          ? 'Stop loss triggered by Stop Loss Lock (locked at +${lockedSl.toStringAsFixed(1)}%).'
+          ? 'Stop loss triggered by Stop Loss Lock (locked at +\$${lockedSl.toStringAsFixed(0)}).'
           : ratcheted
           ? 'Stop loss triggered after the ratchet had already locked in a higher level.'
           : 'Stop loss -50% (baseline) triggered.',
@@ -1437,7 +1434,7 @@ class EngineService {
   /// can never disagree about what actually happened to a given bot -
   /// called right alongside it at every real-close call site.
   String? _stopReasonFor(String buOrderId, String? reasonBy) {
-    final lockedSl = stopLossLockState.lockedSlPercent(buOrderId);
+    final lockedSl = stopLossLockState.lockedUsd(buOrderId);
     final ratcheted = tpSlRatchet.highestThreshold(buOrderId) > 0;
     return switch (reasonBy) {
       'loss_stop' => lockedSl != null
@@ -5902,7 +5899,7 @@ class EngineService {
           //    "direction was wrong" raw -50% loss. SLL-managed bots now
           //    have their own dedicated branch below instead.)
           final wasStopLossLockManaged =
-              stopLossLockState.lockedSlPercent(bot.buOrderId) != null;
+              stopLossLockState.lockedUsd(bot.buOrderId) != null;
           if (!wasInterrupted &&
               bot.appInitiated &&
               bot.trend != null &&
@@ -6205,231 +6202,166 @@ class EngineService {
     }
   }
 
-  /// Auto TP/SL ratchet (2026-09-18, per the user's exact spec): runs every
-  /// minute over every currently-tracked app-initiated bot. Scoped to auto
-  /// bots only, per the user ("i am talking here about auto trade only") —
-  /// manual bots are never touched here.
-  Future<void> _runTpSlRatchetSweep() async {
+  /// Stop Loss Lock (rewritten 2026-11-09, per the user - rules in
+  /// `sll_rules.dart`): mandatory for every running Auto bot, no toggle,
+  /// runs every 5 seconds. Manual bots are never touched. Reads Pionex's
+  /// active bots fresh on every pass so investment / extra margin / position
+  /// are never stale after a top-up.
+  Future<void> _runSllSweep() async {
     // Auto off = the engine does nothing at all (per the user, 2026-11-08).
     if (_forceStopActive()) return;
-    if (!pionex.available) return;
-    for (final bot in _activeGridsById.values.toList()) {
-      if (!bot.appInitiated || bot.isManuallyInterrupted) continue;
-      try {
-        await _checkTpSlRatchet(bot);
-      } catch (e) {
-        // Bug fixed 2026-09-20, live (XRP/ETH/ADA all hit this
-        // simultaneously): `_activeGridsById` is only ever refreshed as a
-        // side effect of OTHER code paths (the checkup pass, the waiting
-        // engine, `_pairActionStart`) - none of which are guaranteed
-        // running at any moment (same root cause as the Start-refuses-
-        // "already running" fix earlier today). A bot that closes on
-        // Pionex's own side (TP/SL hit, manual close, etc.) between
-        // refreshes then gets retried by THIS sweep every
-        // `config.pollIntervalSec` (~5s) forever, each attempt failing
-        // identically with Pionex's real "invalid status:canceled" -
-        // confirmed live: XRP retried every 5s for 10+ minutes straight
-        // after genuinely closing. Rather than adding a full API refresh
-        // to every 5s tick (real extra load for the common case where
-        // nothing's stale), this specific error IS the confirmation the
-        // bot is gone - clean it up immediately so it's never retried
-        // again, exactly like the reconciliation loop already does for a
-        // bot it discovers closed the normal way.
-        if ('$e'.toLowerCase().contains('invalid status:canceled') ||
-            '$e'.toLowerCase().contains('invalid status:finished')) {
-          _activeGridsById.remove(bot.buOrderId);
-          createdBots.forgetBot(bot.buOrderId);
-          botCategories.forget(bot.buOrderId);
-          tpSlRatchet.forget(bot.buOrderId);
-          stopLossLockState.forget(bot.buOrderId);
-          _stopLossLockSlCleared.remove(bot.buOrderId);
+    if (!pionex.available || _sllRunning) return;
+    _sllRunning = true;
+    try {
+      final orders = await pionex.getActiveGrids();
+      for (final raw in orders) {
+        final id =
+            (raw['buOrderId'] ?? (raw['buOrderData'] as Map?)?['buOrderId'])
+                ?.toString();
+        if (id == null || !createdBots.isAppInitiated(id)) continue;
+        final bot = GridBot.fromPionexOrder(raw, appInitiated: true);
+        if (bot.isManuallyInterrupted) continue;
+        try {
+          await _sllCheck(bot);
+        } catch (e) {
           logger.log(
-            'TP/SL RATCHET ${bot.pairKey} (${bot.buOrderId}): already closed on Pionex - forgetting it here instead of retrying forever.',
+            'SLL ${bot.pairKey} (${bot.buOrderId}) failed: $e',
+            level: 'ERROR',
           );
-          continue;
         }
-        logger.log(
-          'TP/SL RATCHET ${bot.pairKey} (${bot.buOrderId}) failed: $e',
-          level: 'ERROR',
-        );
       }
+    } catch (e) {
+      logger.log('SLL: could not read active bots: $e', level: 'ERROR');
+    } finally {
+      _sllRunning = false;
     }
   }
 
-  /// Sets the one-time baseline the moment a bot is missing it: TP pinned
-  /// at the grid's own top edge for a long / bottom edge for a short (per
-  /// the user: "tp = top price range for long trade, tp = low price range
-  /// for short trades"), SL at -50%. Covers both a freshly-created bot
-  /// (called right after a real open succeeds, before a [GridBot] even
-  /// exists for it) and a bot that was already running before this feature
-  /// existed (called from the sweep with an existing [GridBot]'s fields,
-  /// per the user: "apply immediately to currently-running auto bots too").
-  ///
-  /// [applySlBaseline] (2026-09-22, per the user - "stop loss lock once it
-  /// is taged to pair, it should disable regualr -50% rules," confirmed via
-  /// a direct follow-up question: yes, this genuinely means NO stop-loss
-  /// protection at all from the moment a pair is tagged until Stop Loss
-  /// Lock's own +100% P&L gate fires) - false for a Stop Loss Lock-tagged
-  /// pair: TP is still set exactly as normal (never part of the user's "-50%
-  /// rules" complaint), but the `lossStopType`/`lossStopValue` fields are
-  /// simply omitted from the call, leaving SL unset rather than -50%.
-  Future<void> _applyTpSlBaseline({
-    required String buOrderId,
-    required String pairKey,
-    required double? top,
-    required double? bottom,
-    required GridDirection? trend,
-    DateTime? openedAt,
-    bool applySlBaseline = true,
-  }) async {
-    final tpPrice = trend == GridDirection.short ? bottom : top;
-    if (tpPrice == null) {
-      logger.log(
-        'TP/SL RATCHET $pairKey ($buOrderId): no top/bottom known yet, baseline deferred to next sweep',
-      );
-      return;
-    }
-    await pionex.updateTriggerProfitLoss(
-      buOrderId: buOrderId,
-      profitStopType: 'price',
-      profitStopValue: tpPrice.toString(),
-      lossStopType: applySlBaseline ? 'profit_ratio' : null,
-      lossStopValue: applySlBaseline ? '-0.50' : null,
-    );
-    tpSlRatchet.markBaselineApplied(buOrderId, openedAt: openedAt);
-    // Tracked here too (not just the "already running, explicitly cleared"
-    // branch in _checkTpSlRatchet) so untagging later can tell "genuinely
-    // never had a baseline SL" apart from "never checked at all" - both
-    // read the same from tpSlRatchet.baselineApplied() alone.
-    if (!applySlBaseline) _stopLossLockSlCleared.add(buOrderId);
-    logger.log(
-      applySlBaseline
-          ? 'TP/SL RATCHET $pairKey ($buOrderId): baseline set - TP=$tpPrice (${trend?.wireValue}) SL=-50%'
-          : 'STOP LOSS LOCK $pairKey ($buOrderId): tagged before its first open - TP=$tpPrice (${trend?.wireValue}) set, -50% baseline SL skipped entirely, no SL protection until P&L clears +100%.',
-    );
-  }
+  bool _sllRunning = false;
 
-  /// Checks one bot's floating P&L (in USDT) against the dollar ladder
-  /// ([highestDollarThresholdCrossed]/[dollarLockFor], 2026-10-25) and
-  /// tightens its SL if a new, higher dollar threshold has been crossed
-  /// since the last check - converted to the equivalent percentage of
-  /// this bot's own `actualInvestment` before being sent to Pionex's
-  /// `profit_ratio` trigger. TP is never touched here - it stays fixed at
-  /// whatever the baseline set, per the user ("tp unchanged") for every
-  /// rung of the ladder. Only ever ratchets up: a threshold already
-  /// recorded in [tpSlRatchet] is never revisited even if P&L later
-  /// retraces below it (confirmed with the user - locked-in gains stay
-  /// locked in). No grace period - see `tp_sl_ladder.dart`'s doc for why.
-  Future<void> _checkTpSlRatchet(GridBot bot) async {
-    final category = botCategories.categoryOf(bot.buOrderId) ?? AutoCategory.oneHour;
+  /// The investment a top-up is expected to reach, and when it was sent -
+  /// no further top-up on that bot until Pionex reports it (or 60s pass),
+  /// so a stale read can never move the same money twice.
+  final Map<String, ({double expectedActual, DateTime at})> _sllPendingTopUp =
+      {};
+
+  Future<void> _sllCheck(GridBot bot) async {
+    final id = bot.buOrderId;
     final bareBase = bot.base
         .toUpperCase()
         .replaceAll(RegExp(r'\.PERP$', caseSensitive: false), '');
-    // (2026-09-22, per the user - "stop loss lock once it is taged to pair,
-    // it should disable regualr -50% rules," confirmed via a direct
-    // follow-up question: yes, genuinely NO stop-loss protection at all
-    // until Stop Loss Lock's own +100% P&L gate fires - a deliberate
-    // reversal of this feature's original 2026-09-22 design, which kept
-    // the -50% baseline as a safety floor below +100%.)
-    final isStopLossLocked =
-        stopLossLock.isTaggedAuto(bareBase, category) ||
-        stopLossLock.manualCategory(bot.buOrderId) != null;
-    if (!tpSlRatchet.baselineApplied(bot.buOrderId)) {
-      await _applyTpSlBaseline(
-        buOrderId: bot.buOrderId,
-        pairKey: bot.pairKey,
-        top: bot.top,
-        bottom: bot.bottom,
-        trend: bot.trend,
-        openedAt: bot.startTime,
-        applySlBaseline: !isStopLossLocked,
-      );
-    } else if (isStopLossLocked &&
-        !_stopLossLockSlCleared.contains(bot.buOrderId)) {
-      // Tagged AFTER its baseline was already live on Pionex (e.g. tagging
-      // an already-running bot) - the branch above never fires again for
-      // this bot (baselineApplied is already true), so the existing -50%
-      // SL has to be explicitly cleared here instead. TP is left exactly
-      // as it already is - only ever the SL side is the user's complaint.
+
+    // 1. A trade starts with TP and SL blank (once per bot).
+    if (!stopLossLockState.cleared(id)) {
       await pionex.updateTriggerProfitLoss(
-        buOrderId: bot.buOrderId,
+        buOrderId: id,
+        profitStopType: 'price',
+        profitStopValue: '',
         lossStopType: 'profit_ratio',
         lossStopValue: '',
       );
-      _stopLossLockSlCleared.add(bot.buOrderId);
-      logger.log(
-        'STOP LOSS LOCK ${bot.pairKey}[${category.label}] (${bot.buOrderId}): tagged - cleared the existing -50% baseline SL now, no SL protection until P&L clears +100%.',
-      );
-    } else if (!isStopLossLocked &&
-        _stopLossLockSlCleared.contains(bot.buOrderId) &&
-        stopLossLockState.lockedSlPercent(bot.buOrderId) == null) {
-      // Untagged (2026-09-23, per the user: "once it is untagged, regular
-      // -50% stop loss rule leads") - but ONLY restore the -50% baseline if
-      // Stop Loss Lock never actually locked a real value while it was
-      // tagged (confirmed with the user: if it HAD locked something, e.g.
-      // +140% from the signal or the flat +100% from the +200% rule,
-      // untagging must never loosen that back down - see the permanent
-      // guard just below, which keeps the ladder off for good once
-      // anything is ever locked).
-      await pionex.updateTriggerProfitLoss(
-        buOrderId: bot.buOrderId,
-        lossStopType: 'profit_ratio',
-        lossStopValue: '-0.50',
-      );
-      _stopLossLockSlCleared.remove(bot.buOrderId);
-      logger.log(
-        'STOP LOSS LOCK ${bot.pairKey}[${category.label}] (${bot.buOrderId}): untagged - nothing was ever locked, restored the -50% baseline SL.',
-      );
+      stopLossLockState.markCleared(id);
+      logger.log('SLL ${bot.pairKey} ($id): TP and SL cleared - SLL is in charge.');
     }
-    final appliedAt = tpSlRatchet.baselineAppliedAt(bot.buOrderId);
-    if (appliedAt == null) return;
-    // Override: the ladder below this point - the part that would
-    // otherwise keep escalating SL every 10% of P&L - must never run for a
-    // tagged pair; [_checkStopLossLock] (its own separate 3-minute sweep)
-    // is the sole authority for any further SL change on it from here on.
-    if (isStopLossLocked) return;
-    // Permanent guard, even after untagging (2026-09-23, per the user's
-    // confirmed choice above): once Stop Loss Lock has genuinely locked a
-    // real SL value for this bot instance, the normal ladder must never
-    // touch its SL again for the rest of this bot's lifetime - reusing the
-    // ladder's own threshold-crossing math here could otherwise compute a
-    // LOWER SL than what's already locked (the ladder's own
-    // [tpSlRatchet.highestThreshold] was never updated while tagged, so it
-    // has no idea a higher value is already live) and send that, a real
-    // loosening. Simpler and safer to just leave this bot's SL as Stop
-    // Loss Lock's sole, permanent responsibility from here on.
-    if (stopLossLockState.lockedSlPercent(bot.buOrderId) != null) return;
-    // Dollar ladder (2026-10-25, per the user's exact spec) - replaces the old percentage-based ladder entirely,
-    // including its grace period: profit-only (never touches SL below
-    // $0), checked on this same sweep's existing cadence
-    // (`config.pollIntervalSec`, already faster than the spec's "~every
-    // 30s"), no waiting period before the first rung can fire - a lock is
-    // only ever a GAIN relative to the baseline SL, never a loosening, so
-    // there is no early-noise risk a grace period would need to guard
-    // against the way the old percentage ladder's SL-tightening did.
-    // `_activeGridsById`'s own GridBot copies never carry `currentPrice`
-    // (unlike the GUI repository's, which fetches it separately for
-    // display) - [GridBot.profitAmount] needs it now that it's computed
-    // from the real position mark-to-market move, not `marginBalance`.
-    final currentPrice = await pionex.getTickerPrice('${bareBase}_USDT_PERP');
-    final profit = bot.copyWith(currentPrice: currentPrice).profitAmount;
-    if (profit == null) return;
-    final threshold = highestDollarThresholdCrossed(profit);
-    if (threshold == null) return;
-    final recorded = tpSlRatchet.highestThreshold(bot.buOrderId);
-    if (threshold <= recorded) return;
-    final lockDollars = dollarLockFor(threshold);
-    final actualInvestment = bot.actualInvestment;
-    if (actualInvestment == null || actualInvestment == 0) return;
-    final lockRatio = lockDollars / actualInvestment;
+
+    final price = await pionex.getTickerPrice('${bareBase}_USDT_PERP');
+    final live = bot.copyWith(currentPrice: price);
+    final profit = live.profitAmount;
+    final pct = live.profitPercent;
+    final actual = bot.actualInvestment;
+    if (profit == null || pct == null || actual == null || actual <= 0) return;
+
+    // 2. P&L >= 200%: move extra margin into the investment.
+    final pending = _sllPendingTopUp[id];
+    if (pending != null &&
+        (actual >= pending.expectedActual - 0.005 ||
+            DateTime.now().difference(pending.at) > const Duration(seconds: 60))) {
+      _sllPendingTopUp.remove(id);
+    }
+    if (pct >= 200 && !_sllPendingTopUp.containsKey(id)) {
+      final x = sllTopUpAmount(
+        actualInvestment: actual,
+        extraMargin: bot.extraMargin ?? 0,
+      );
+      if (x > 0 && price != null) {
+        await _sllTopUp(bot, x, price, pct);
+        return; // re-read fresh numbers on the next pass
+      }
+    }
+
+    // 3. P&L >= $50: lock SL at P&L - $20 ($10 steps), only ever up.
+    final stored = stopLossLockState.lockedUsd(id);
+    final fresh = sllLockUsd(profit);
+    final target = fresh == null
+        ? stored
+        : (stored == null || fresh > stored ? fresh : stored);
+    if (target == null) return;
+    final ratio = double.parse((target / actual).toStringAsFixed(4));
+    final sent = stopLossLockState.sentRatio(id);
+    if (stored != null && target <= stored && sent == ratio) return;
     await pionex.updateTriggerProfitLoss(
-      buOrderId: bot.buOrderId,
+      buOrderId: id,
       lossStopType: 'profit_ratio',
-      lossStopValue: lockRatio.toStringAsFixed(4),
+      lossStopValue: ratio.toStringAsFixed(4),
     );
-    tpSlRatchet.recordThreshold(bot.buOrderId, threshold);
+    stopLossLockState.recordLock(id, target, ratio);
     logger.log(
-      'TP/SL RATCHET ${bot.pairKey} (${bot.buOrderId}): P&L=\$${profit.toStringAsFixed(2)} crossed +\$$threshold - SL locked to \$${lockDollars.toStringAsFixed(2)} (${(lockRatio * 100).toStringAsFixed(1)}% of \$${actualInvestment.toStringAsFixed(2)} actual investment)',
+      'SLL ${bot.pairKey} ($id): P&L=\$${profit.toStringAsFixed(2)} - SL locks '
+      '+\$${target.toStringAsFixed(0)} (${(ratio * 100).toStringAsFixed(1)}% of '
+      '\$${actual.toStringAsFixed(2)} actual investment).',
+    );
+  }
+
+  /// Moves [x] USDT from this bot's extra margin into its investment:
+  /// reduceMargin (to free balance), then invest_in. If the invest step
+  /// fails, the money is put back as margin.
+  Future<void> _sllTopUp(GridBot bot, double x, double price, double pct) async {
+    final id = bot.buOrderId;
+    final actual = bot.actualInvestment!;
+    final check = await pionex.checkReduceMargin(buOrderId: id, amount: x);
+    final maxAmount = double.tryParse('${check['maxAmount']}') ?? 0;
+    if (check['checkResult'] != true || maxAmount <= 0) {
+      logger.log(
+        'SLL ${bot.pairKey} ($id): P&L=${pct.toStringAsFixed(1)}% but Pionex '
+        'allows no margin reduction now (max $maxAmount) - retrying next pass.',
+      );
+      return;
+    }
+    final amount = maxAmount < x ? maxAmount : x;
+    await pionex.reduceMargin(buOrderId: id, amount: amount);
+    await Future<void>.delayed(const Duration(seconds: 3));
+    try {
+      await pionex.investInFuturesGrid(
+        buOrderId: id,
+        openPrice: price,
+        quoteInvestment: amount,
+      );
+    } catch (e) {
+      logger.log(
+        'SLL ${bot.pairKey} ($id): investing \$$amount failed ($e) - putting it '
+        'back as extra margin.',
+        level: 'ERROR',
+      );
+      try {
+        await pionex.addMargin(buOrderId: id, amount: amount);
+      } catch (e2) {
+        logger.log(
+          'SLL ${bot.pairKey} ($id): could not put \$$amount back as margin '
+          '($e2) - it is in the free balance.',
+          level: 'CRITICAL',
+        );
+      }
+      _sllPendingTopUp[id] = (expectedActual: actual + 1e9, at: DateTime.now());
+      return;
+    }
+    _sllPendingTopUp[id] = (
+      expectedActual: actual + amount,
+      at: DateTime.now(),
+    );
+    logger.log(
+      'SLL ${bot.pairKey} ($id): P&L=${pct.toStringAsFixed(1)}% >= 200% - moved '
+      '\$${amount.toStringAsFixed(2)} from extra margin to investment '
+      '(\$${actual.toStringAsFixed(2)} -> \$${(actual + amount).toStringAsFixed(2)}).',
     );
   }
 
@@ -6538,348 +6470,6 @@ class EngineService {
     }
   }
 
-  /// Whether any higher-priority track genuinely needs the chart right now
-  /// - Stop Loss Lock voluntarily yields to all of them (checked between
-  /// every pair in [_runStopLossLockSweep]'s loop), since it is the
-  /// lowest-priority track in this file: a profit-lock optimization, never
-  /// a real trading signal, so it must never meaningfully delay Checkup,
-  /// Start, or any AutoCategory's own candle-boundary check.
-  bool _shouldYieldStopLossLock() =>
-      storage.fileExists(storage.checknowFile) ||
-      storage.fileExists(storage.pairActionFile) ||
-      allAutoCategories.any(_isNewCandleDueFor);
-
-  /// Drives the "Stop Loss Lock" engine (2026-09-22, per the user's exact
-  /// spec) - a fixed 3-minute sweep over every tagged auto (base, category)
-  /// and manual (buOrderId) pair, entirely independent of any
-  /// [AutoCategory]'s own candle-gated cadence. Only starts when the chart
-  /// is genuinely idle (same "polite, never preempts" behavior every
-  /// routine, non-force AutoCategory tick already has); once running, it
-  /// checks [_shouldYieldStopLossLock] before every single pair and stops
-  /// early the instant something higher-priority needs the chart - any
-  /// pairs not yet reached this tick simply get checked on the next one,
-  /// 3 minutes later, so nothing is ever lost, only delayed (same tolerance
-  /// this feature was explicitly designed around).
-  Future<void> _runStopLossLockSweep() async {
-    // Auto off = the engine does nothing at all (per the user, 2026-11-08).
-    if (_forceStopActive()) return;
-    if (!pionex.available) return;
-    // Re-entrancy guard: a sweep over many tagged pairs (each a real
-    // chart-switch + wait + 6s confirm re-read) can genuinely run longer
-    // than this timer's own 3-minute interval - without this check, the
-    // NEXT periodic tick would start a second concurrent sweep on top of
-    // one still running, racing the same chart. A tick that finds one
-    // already in progress just skips itself; nothing is lost, the
-    // in-progress sweep's own yield check already caps how long it can run
-    // before handing the chart back.
-    if (_stopLossLockRunning ||
-        _mainLoopRunning ||
-        _pairActionRunning ||
-        _anyAutoRunning) {
-      return;
-    }
-    final autoTargets = stopLossLock.autoEntries();
-    final manualTargets = stopLossLock.manualEntries();
-    if (autoTargets.isEmpty && manualTargets.isEmpty) return;
-    _stopLossLockRunning = true;
-    try {
-      // Bug fixed 2026-09-25, live (per the user: "there are some records
-      // in pionex history not in app.. why? / why this keep hapenning?"):
-      // reconciliation - the logic that notices a bot vanished from
-      // Pionex's active list and records its close in History + recycles
-      // its P&L - lives entirely inside `_refreshActiveGrids()`, which is
-      // only ever called from a category's own candle-gated checkup pass.
-      // Every currently-tagged pair is 1H, so that pass (and therefore
-      // reconciliation) only happened about once an hour - confirmed live:
-      // 5 real SLL SL closes (SOL/DOGE/ETH/ADA/SHIB) sat un-recorded and
-      // un-recycled for up to 28 minutes, simply because this 3-minute
-      // sweep checked their P&L and locked their SL but never once asked
-      // "is this bot even still running?" One extra, cheap refresh here -
-      // already-established as safe and idempotent, called from half a
-      // dozen other sites in this file - means ANY closed bot (tagged or
-      // not) gets reconciled within 3 minutes instead of up to 60, using
-      // the exact same battle-tested reconciliation logic already inside
-      // `_refreshActiveGrids()`, unchanged.
-      await _refreshActiveGrids();
-      for (final entry in autoTargets) {
-        if (_shouldYieldStopLossLock()) {
-          logger.log(
-            'STOP LOSS LOCK: yielding the chart - a higher-priority track '
-            'needs it, remaining pair(s) retried next sweep.',
-          );
-          return;
-        }
-        final bot = _appGridForKey(_gridKey(entry.base), entry.category);
-        if (bot == null) continue;
-        // Bug fixed 2026-09-24, live - see `_adoptOpenEntryIfNeeded`'s doc
-        // comment for the full story. This 3-minute sweep is the MOST
-        // frequent touchpoint a tagged auto bot gets (far more often than
-        // its own category's candle-gated pass, which is what the two
-        // matching calls elsewhere depend on) - calling it here too means a
-        // currently-orphaned bot (any tagged base still running from before
-        // tonight's fix was deployed) self-heals within 3 minutes instead
-        // of waiting for its next hourly candle boundary.
-        _adoptOpenEntryIfNeeded(
-          bot,
-          '${_gridKey(entry.base)}|${entry.category.wireValue}',
-          entry.base,
-          entry.category,
-        );
-        try {
-          await _checkStopLossLock(bot, entry.category);
-        } catch (e) {
-          logger.log(
-            'STOP LOSS LOCK ${bot.pairKey}[${entry.category.label}] (${bot.buOrderId}) failed: $e',
-            level: 'ERROR',
-          );
-        }
-      }
-      for (final entry in manualTargets) {
-        if (_shouldYieldStopLossLock()) {
-          logger.log(
-            'STOP LOSS LOCK: yielding the chart - a higher-priority track '
-            'needs it, remaining pair(s) retried next sweep.',
-          );
-          return;
-        }
-        final bot = _activeGridsById[entry.buOrderId];
-        if (bot == null) continue;
-        try {
-          await _checkStopLossLock(bot, entry.category);
-        } catch (e) {
-          logger.log(
-            'STOP LOSS LOCK ${bot.pairKey}[${entry.category.label}] (${bot.buOrderId}) failed: $e',
-            level: 'ERROR',
-          );
-        }
-      }
-    } finally {
-      _stopLossLockRunning = false;
-      _wakePendingAutoCategory();
-    }
-  }
-
-  /// Sends one SL-lock update via `updateTriggerProfitLoss`, applying the
-  /// same "never loosens" guard [StopLossLockStateStore.recordLock] already
-  /// enforces on the STORE side - checked again here first so a tied/lower
-  /// value never even reaches a real API call. Shared by both the
-  /// signal-driven P&L-10 lock and the flat +100% lock the +200% investment
-  /// ratchet applies (2026-09-23, per the user).
-  Future<void> _lockStopLossLockValue(
-    GridBot bot,
-    double slPercent,
-    String reason,
-  ) async {
-    final locked = stopLossLockState.lockedSlPercent(bot.buOrderId);
-    if (locked != null && locked >= slPercent) return;
-    await pionex.updateTriggerProfitLoss(
-      buOrderId: bot.buOrderId,
-      lossStopType: 'profit_ratio',
-      lossStopValue: (slPercent / 100).toStringAsFixed(4),
-    );
-    stopLossLockState.recordLock(bot.buOrderId, slPercent);
-    logger.log(
-      'STOP LOSS LOCK ${bot.pairKey} (${bot.buOrderId}): $reason - SL locked to +${slPercent.toStringAsFixed(1)}%.',
-    );
-  }
-
-  /// Ensures at least [needed] USDT is free in the account before the
-  /// investment ratchet tries to spend it (2026-09-23, per the user: "if
-  /// current free balance is 0 and app need to increase actual investment
-  /// for a tagged pair sll, then app can withdraw required value from same
-  /// bot margin and then add it to same bot actual invesmtnet"). If free
-  /// balance already covers it, this is a no-op. Otherwise draws exactly
-  /// the shortfall from THIS SAME bot's own margin reserve via the real,
-  /// live-verified `reduceMargin` endpoint (2026-09-23 - confirmed on two
-  /// different real bots, both directions, `extraMargin` and free balance
-  /// each moving by the exact requested amount every time; this is a
-  /// SEPARATE, dedicated endpoint from the old `adjustParams`/
-  /// `extraMarginAmount` path, which was found dead - reports success,
-  /// changes nothing - during this same investigation). Always checks via
-  /// `checkReduceMargin` first (its `maxAmount` is the real ceiling - the
-  /// bot's own margin might not even cover the shortfall) rather than
-  /// assuming the withdrawal will succeed; skips this cycle (logged, no
-  /// exception) if even the bot's own margin can't cover it, leaving the
-  /// investment increase to simply retry on a later sweep once either free
-  /// balance or this bot's margin recovers.
-  Future<bool> _ensureFreeBalanceFor(GridBot bot, double needed) async {
-    final free = (await pionex.getBalance('USDT')).free;
-    if (free >= needed) return true;
-    final shortfall = double.parse((needed - free).toStringAsFixed(6));
-    final check = await pionex.checkReduceMargin(
-      buOrderId: bot.buOrderId,
-      amount: shortfall,
-    );
-    final maxAmount = double.tryParse('${check['maxAmount']}') ?? 0;
-    if (check['checkResult'] != true || maxAmount < shortfall) {
-      logger.log(
-        'STOP LOSS LOCK ${bot.pairKey} (${bot.buOrderId}): need $needed USDT but free balance is only '
-        '$free and this bot\'s own margin can only spare $maxAmount (shortfall $shortfall) - '
-        'skipping this cycle, will retry next sweep.',
-        level: 'ERROR',
-      );
-      return false;
-    }
-    await pionex.reduceMargin(buOrderId: bot.buOrderId, amount: shortfall);
-    logger.log(
-      'STOP LOSS LOCK ${bot.pairKey} (${bot.buOrderId}): free balance ($free) was short of the '
-      '$needed USDT needed - drew $shortfall USDT from this bot\'s own margin to cover it.',
-    );
-    // The transfer settles within a few seconds in every real test run
-    // during this feature's own live verification - a short fixed wait
-    // here is simpler and safer than polling, given this whole ratchet
-    // already only runs once per 9-minute window at most.
-    await Future<void>.delayed(const Duration(seconds: 5));
-    return true;
-  }
-
-  /// The +200% investment ratchet (2026-09-23, per the user's exact spec,
-  /// confirmed live before deploy: the underlying add-investment call and
-  /// the `floor(current)+1` delta math were both tested for real against a
-  /// live bot first - $0.73 -> $1.00, exact match). Needs no TradingView
-  /// chart access at all (just the Pionex ticker price already fetched by
-  /// the caller), so it runs independently of every chart-holding
-  /// priority/yield rule the signal check below is still subject to.
-  ///
-  /// First action (the very first time P&L clears +200% for this bot
-  /// instance, detected by [StopLossLockStateStore.lastInvestmentIncreaseAt]
-  /// being null): rounds actual investment up to the next whole USDT
-  /// STRICTLY above current (`floor(current)+1`, even from an
-  /// already-whole number - confirmed with the user: "if current actual
-  /// investment is 1.00 then step 2 will be adding 1usdt"), and locks SL to
-  /// a flat +100% (not P&L-10 - a fixed number, via [_lockStopLossLockValue]
-  /// so it still only ever tightens further). Every subsequent action (every
-  /// 9 minutes / 3 SLL cycles after the last one, gated by wall-clock time
-  /// rather than counting exact cycles - robust against an occasional
-  /// yielded sweep) adds a flat +1 USDT, indefinitely, for as long as P&L
-  /// stays >=200% - confirmed with the user: "indefinite, every 9 min while
-  /// P&L>=200%," no fixed cap.
-  ///
-  /// Stops for good the moment [StopLossLockStateStore.signalFired] is true
-  /// for this bot - the caller checks that before ever calling this.
-  ///
-  /// If the account's free balance can't cover the increase,
-  /// [_ensureFreeBalanceFor] draws the shortfall from THIS SAME bot's own
-  /// margin reserve first, per the user's exact spec.
-  Future<void> _runStopLossLockInvestmentRatchet(
-    GridBot bot,
-    double pct,
-    String bareBase,
-  ) async {
-    final lastIncreaseAt = stopLossLockState.lastInvestmentIncreaseAt(
-      bot.buOrderId,
-    );
-    final isFirst = lastIncreaseAt == null;
-    if (!isFirst &&
-        DateTime.now().difference(lastIncreaseAt) < const Duration(minutes: 9)) {
-      return;
-    }
-    final currentActual = bot.actualInvestment;
-    if (currentActual == null) return;
-    final targetInvestment = isFirst
-        ? (currentActual.floor() + 1).toDouble()
-        : currentActual + 1;
-    final delta = double.parse((targetInvestment - currentActual).toStringAsFixed(6));
-    if (delta <= 0) return;
-    final openPrice =
-        await pionex.getTickerPrice('${bareBase}_USDT_PERP') ??
-        bot.currentPrice ??
-        bot.entryPrice;
-    if (openPrice == null) return;
-    try {
-      if (!await _ensureFreeBalanceFor(bot, delta)) return;
-      await pionex.investInFuturesGrid(
-        buOrderId: bot.buOrderId,
-        openPrice: openPrice,
-        quoteInvestment: delta,
-      );
-      stopLossLockState.recordInvestmentIncrease(bot.buOrderId);
-      logger.log(
-        'STOP LOSS LOCK ${bot.pairKey} (${bot.buOrderId}): P&L=${pct.toStringAsFixed(1)}% '
-        '>= +200% - actual investment increased by $delta USDT '
-        '($currentActual -> $targetInvestment)${isFirst ? ' (first crossing)' : ''}.',
-      );
-      if (isFirst) {
-        await _lockStopLossLockValue(
-          bot,
-          100,
-          'P&L cleared +200% for the first time',
-        );
-      }
-    } catch (e) {
-      logger.log(
-        'STOP LOSS LOCK ${bot.pairKey} (${bot.buOrderId}): investment increase failed (will retry next sweep): $e',
-        level: 'ERROR',
-      );
-    }
-  }
-
-  /// The actual Stop Loss Lock check for one tagged bot (2026-09-22, per
-  /// the user's exact spec): dormant until floating P&L genuinely clears
-  /// +100% - below that, there is NO stop-loss protection at all from THIS
-  /// mechanism (a tagged bot can still be closed by the normal open/close
-  /// signal rule at any P&L level - see `_manageGridPair`'s "Take-profit =
-  /// opposite signal" block, unrestricted since 2026-09-25). Once past
-  /// +100%, watches for a reversal using the EXACT SAME confirmed-signal
-  /// rule the primary open/close engine uses ([_checkBuySellOnPair] /
-  /// [_latestSignal]) - reworked 2026-09-25, per the user's exact spec
-  /// ("use new rule for reversal signal"), replacing the previous simpler
-  /// value-threshold check. On a hit, locks SL to (P&L - 10) points via
-  /// [_lockStopLossLockValue] - only ever tightens further. TP is never
-  /// touched here, same convention as the ratchet.
-  ///
-  /// This remains a genuinely separate, useful mechanism even though the
-  /// primary engine can now ALSO close a tagged bot directly on the same
-  /// signal: this 3-minute sweep checks far more often than the primary
-  /// engine's own candle-gated pass does for a 1H-category bot (once an
-  /// hour) - so it can lock (and, via Pionex's own real SL trigger, end)
-  /// the bot well before the primary engine's next scheduled read would
-  /// even run. A faster safety net, not a duplicate.
-  ///
-  /// The old two-tier ('extreme'/'hesitation') distinction and the forced
-  /// opposite-direction reignite it drove were RETIRED 2026-09-25, per the
-  /// user: the next bot's direction is now decided purely by the normal
-  /// open/close rule's own start condition, whatever the close-trigger
-  /// scenario was - no special-casing needed any more.
-  ///
-  /// Extended 2026-09-23 with the +200% investment ratchet (see
-  /// [_runStopLossLockInvestmentRatchet]): runs BEFORE the signal check,
-  /// every cycle, for as long as the signal hasn't fired yet - once it
-  /// does, [StopLossLockStateStore.signalFired] permanently stops it, and
-  /// only the signal-driven SL lock below continues.
-  Future<void> _checkStopLossLock(GridBot bot, AutoCategory category) async {
-    final bareBase = bot.base
-        .toUpperCase()
-        .replaceAll(RegExp(r'\.PERP$', caseSensitive: false), '');
-    final currentPrice = await pionex.getTickerPrice('${bareBase}_USDT_PERP');
-    final pct = bot.copyWith(currentPrice: currentPrice).profitPercent;
-    if (pct == null || pct <= 100) return;
-    final signalAlreadyFired = stopLossLockState.signalFired(bot.buOrderId);
-    if (!signalAlreadyFired && pct >= 200) {
-      await _runStopLossLockInvestmentRatchet(bot, pct, bareBase);
-    }
-    final slEntryKey = '${_gridKey(bareBase)}|${category.wireValue}';
-    final confirmedEvent = await _confirmedWorm10Event(
-      slEntryKey,
-      bot.tickerSymbol,
-      category,
-      skipCooldown: true,
-    );
-    if (confirmedEvent == null) return;
-    final eventDirection = worm10EventDirection(confirmedEvent.kind);
-    final isReversal = switch (bot.trend) {
-      GridDirection.long => eventDirection == TradeDirection.short,
-      GridDirection.short => eventDirection == TradeDirection.long,
-      null => false,
-    };
-    if (!isReversal) return;
-    if (!signalAlreadyFired) stopLossLockState.markSignalFired(bot.buOrderId);
-    await _lockStopLossLockValue(
-      bot,
-      pct - 10,
-      'P&L=${pct.toStringAsFixed(1)}% reversal event (${confirmedEvent.kind.name})',
-    );
-  }
 
   Future<List<String>> _readRedList(CdpClient cdp) async {
     WatchlistReading watchlist;
@@ -8609,44 +8199,6 @@ class EngineService {
         _persistPendingInvestment(base, category, null);
         createdBots.rememberBot(newBuOrderId);
         botCategories.setCategory(newBuOrderId, category);
-        // Auto TP/SL ratchet baseline (2026-09-18, per the user) - fired
-        // right after a real open, before this bot even has a GridBot
-        // entry yet, so it never has to wait for the next sweep. Failure
-        // here must never abort the open itself (the grid is already real
-        // and live on Pionex) - logged and swallowed, the sweep will retry
-        // it on the next minute tick since baselineApplied stays false.
-        //
-        // Bug fixed 2026-09-24, per the user's own direct question ("once
-        // app recycled sll bot, the startup tp is top price... sl price is
-        // blank??? check the code"): this call never checked the tag at
-        // all, so a freshly-opened/recycled Stop-Loss-Lock-tagged bot
-        // always got the -50% baseline SL live on Pionex first, only
-        // getting it cleared moments later once `_checkTpSlRatchet`'s own
-        // sweep next ran (up to ~5s later, `config.pollIntervalSec`) - a
-        // real, if narrow, window where a tagged bot briefly had the -50%
-        // SL the whole feature exists to disable. `bareBase` computed the
-        // same way every other Stop Loss Lock check-site already does.
-        final bareBase = base
-            .toUpperCase()
-            .replaceAll(RegExp(r'\.PERP$', caseSensitive: false), '');
-        final isStopLossLocked =
-            stopLossLock.isTaggedAuto(bareBase, category) ||
-            stopLossLock.manualCategory(newBuOrderId) != null;
-        unawaited(
-          _applyTpSlBaseline(
-            buOrderId: newBuOrderId,
-            pairKey: symbol,
-            top: range.top,
-            bottom: range.bottom,
-            trend: direction,
-            applySlBaseline: !isStopLossLocked,
-          ).catchError((e) {
-            logger.log(
-              'TP/SL RATCHET $symbol ($newBuOrderId): baseline failed at open, will retry on next sweep: $e',
-              level: 'ERROR',
-            );
-          }),
-        );
         // Bug fixed 2026-09-11, live (per the user: "this bot ... recently
         // opened in 3m and it is tagged last??? why" / "i did not tag it
         // last"): a brand-new grid just got created for `base`, but nothing

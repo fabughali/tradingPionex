@@ -4,7 +4,6 @@ import '../core/core_spacing.dart';
 import '../data/models/grid_bot.dart';
 import 'bot_add_investment_sheet.dart';
 import 'bot_margin_sheet.dart';
-import 'bot_stop_loss_lock_sheet.dart';
 import 'bot_stop_sheet.dart';
 
 /// Gear-icon "More" menu (2026-09-18, per the user: "for auto bots and
@@ -78,11 +77,6 @@ class _BotActionsMenu extends StatelessWidget {
         icon: Icons.add_circle_outline,
         label: 'Add investment',
         onTap: (ctx) => showAddInvestmentSheet(ctx, bot: bot),
-      ),
-      _MenuItem(
-        icon: Icons.lock_clock_outlined,
-        label: 'Stop Loss Lock',
-        onTap: (ctx) => showStopLossLockSheet(ctx, bot: bot),
       ),
       _MenuItem(
         icon: Icons.power_settings_new,

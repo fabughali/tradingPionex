@@ -71,25 +71,6 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     }
   }
 
-  /// The `buOrderId` of the row whose "Stop Loss Lock" toggle was just
-  /// switched off (2026-09-22, per the user: "add a disable toggle same as
-  /// last toggle") - drives that row's spinner while [_cancelStopLossLock]
-  /// runs, same pattern as [_cancelLastRowId].
-  String? _cancelStopLossLockRowId;
-
-  Future<void> _cancelStopLossLock(GridBot bot) async {
-    final repo = ref.read(controlRepositoryProvider);
-    setState(() => _cancelStopLossLockRowId = bot.buOrderId);
-    try {
-      await repo.stopLossLockSelect([bot.buOrderId], enable: false);
-      ref.invalidate(statusReportProvider);
-      _notify('${bot.pairKey}: Stop Loss Lock disabled.', success: true);
-    } catch (e) {
-      _notify('$e', success: false);
-    } finally {
-      if (mounted) setState(() => _cancelStopLossLockRowId = null);
-    }
-  }
 
   /// base -> categories with a currently-running auto bot for that exact
   /// base (2026-09-11, per the user's rule: a pair can only have ONE
@@ -1004,11 +985,6 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                       lastMarkedBases: repo.retiredBases(),
                       onCancelLast: _cancelLast,
                       cancelLastActiveRowId: _cancelLastRowId,
-                      stopLossLockedIds: repo.stopLossLockedIds(
-                        status.grids.appRunning,
-                      ),
-                      onCancelStopLossLock: _cancelStopLossLock,
-                      cancelStopLossLockActiveRowId: _cancelStopLossLockRowId,
                       onBulkStop: (bots) => _run(
                         'stop-selected',
                         () async {
@@ -1039,20 +1015,6 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                         successMessage:
                             'Converted ${bots.length} bot(s) to manual.',
                       ),
-                      onBulkStopLossLock: (bots, markPending) {
-                        markPending();
-                        return _run(
-                          'stop-loss-lock-selected',
-                          () async {
-                            await repo.stopLossLockSelect(
-                              bots.map((b) => b.buOrderId).toList(),
-                              enable: true,
-                            );
-                          },
-                          successMessage:
-                              'Stop Loss Lock enabled for ${bots.length} bot(s).',
-                        );
-                      },
                     ),
                         WaitingBasesView(
                           waiting: repo.waitingBases(
@@ -1147,11 +1109,6 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                       emptyMessage: 'No running manual bots right now.',
                       entrySignalFor: (id) => repo.entrySignalFor(id),
                       closeCandidateFor: repo.closeCandidateFor,
-                      stopLossLockedIds: repo.stopLossLockedIds(
-                        status.grids.manualRunning,
-                      ),
-                      onCancelStopLossLock: _cancelStopLossLock,
-                      cancelStopLossLockActiveRowId: _cancelStopLossLockRowId,
                       onBulkConvertToAuto: (bots) async {
                         final category = await showCategoryPickerDialog(
                           context,
@@ -1171,39 +1128,6 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                           },
                           successMessage:
                               'Converted ${bots.length} bot(s) to auto (${category.label}) — the engine will check them up from here on.',
-                        );
-                      },
-                      // Manual bots have no inherent category (2026-09-22,
-                      // per the user) - Stop Loss Lock needs one to know
-                      // which chart timeframe to watch, so this asks first,
-                      // reusing the exact same picker the Convert to Auto
-                      // flow above already uses. The one picked choice
-                      // applies to every bot in this selection. `markPending`
-                      // is deliberately called only AFTER the picker
-                      // resolves (not on click) - see its own doc comment on
-                      // `GridsTable.onBulkStopLossLock`: marking pending
-                      // before a cancellable picker would leave the
-                      // checkbox stuck disabled forever if the user backs
-                      // out of it.
-                      onBulkStopLossLock: (bots, markPending) async {
-                        final category = await showCategoryPickerDialog(
-                          context,
-                          title:
-                              'Stop Loss Lock: chart timeframe for ${bots.length} bot(s)',
-                        );
-                        if (category == null || !context.mounted) return;
-                        markPending();
-                        await _run(
-                          'stop-loss-lock-selected',
-                          () async {
-                            await repo.stopLossLockSelect(
-                              bots.map((b) => b.buOrderId).toList(),
-                              enable: true,
-                              manualCategory: category,
-                            );
-                          },
-                          successMessage:
-                              'Stop Loss Lock enabled for ${bots.length} bot(s) (${category.label}).',
                         );
                       },
                     ),

@@ -64,23 +64,6 @@ class _ControlsScreenState extends ConsumerState<ControlsScreen> {
     }
   }
 
-  /// See the matching field/method on `DashboardScreen` - same pattern.
-  String? _cancelStopLossLockRowId;
-
-  Future<void> _cancelStopLossLock(GridBot bot) async {
-    final repo = ref.read(controlRepositoryProvider);
-    setState(() => _cancelStopLossLockRowId = bot.buOrderId);
-    try {
-      await repo.stopLossLockSelect([bot.buOrderId], enable: false);
-      ref.invalidate(statusReportProvider);
-      _notify('${bot.pairKey}: Stop Loss Lock disabled.', success: true);
-    } catch (e) {
-      _notify('$e', success: false);
-    } finally {
-      if (mounted) setState(() => _cancelStopLossLockRowId = null);
-    }
-  }
-
   /// A single Auto engine's (1m/1H/1D) own on/off switch (2026-09-07) -
   /// independent of the master Auto switch above, and of the other 2
   /// categories. ON: resumes that category and forces an immediate check on
@@ -699,11 +682,6 @@ class _ControlsScreenState extends ConsumerState<ControlsScreen> {
                     lastMarkedBases: repo.retiredBases(),
                     onCancelLast: _cancelLast,
                     cancelLastActiveRowId: _cancelLastRowId,
-                    stopLossLockedIds: repo.stopLossLockedIds(
-                      status.grids.appRunning,
-                    ),
-                    onCancelStopLossLock: _cancelStopLossLock,
-                    cancelStopLossLockActiveRowId: _cancelStopLossLockRowId,
                     onBulkStop: (bots) => _run(
                       'stop-selected',
                       () async {
@@ -734,20 +712,6 @@ class _ControlsScreenState extends ConsumerState<ControlsScreen> {
                       successMessage:
                           'Converted ${bots.length} bot(s) to manual.',
                     ),
-                    onBulkStopLossLock: (bots, markPending) {
-                      markPending();
-                      return _run(
-                        'stop-loss-lock-selected',
-                        () async {
-                          await repo.stopLossLockSelect(
-                            bots.map((b) => b.buOrderId).toList(),
-                            enable: true,
-                          );
-                        },
-                        successMessage:
-                            'Stop Loss Lock enabled for ${bots.length} bot(s).',
-                      );
-                    },
                   ),
                       WaitingBasesView(
                         waiting: repo.waitingBases(
