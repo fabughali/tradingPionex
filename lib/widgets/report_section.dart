@@ -660,7 +660,24 @@ class _PreviewChecklistState extends State<PreviewChecklist> {
     final r = m == null ? null : widget.momentum[m.pionexSymbol];
     if (r == null) return const Text('—');
     String f(double v) => '${v.toStringAsFixed(2)}%';
-    return Text('${f(r.then)}   ${f(r.now)}');
+    // Then, now, and the difference (now - then), per the user.
+    final diff = r.now - r.then;
+    return Text.rich(
+      TextSpan(
+        children: [
+          TextSpan(text: '${f(r.then)}   ${f(r.now)}   '),
+          TextSpan(
+            text: '${diff >= 0 ? '+' : ''}${f(diff)}',
+            style: TextStyle(
+              color: diff >= 0
+                  ? context.tradingColors.profit
+                  : context.tradingColors.loss,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   /// The 24h move, green up / red down, like Pionex shows it.
