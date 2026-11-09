@@ -375,6 +375,9 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context)!;
+    // Keeps the Next Trade star-sort recorder running while the app is open
+    // (it records only while Power is on).
+    ref.listen(priceMomentumProvider, (_, _) {});
     final statusAsync = ref.watch(statusReportProvider);
     final repo = ref.watch(controlRepositoryProvider);
     final pnl = repo.pnlSummary();

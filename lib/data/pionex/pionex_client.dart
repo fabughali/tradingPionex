@@ -258,7 +258,7 @@ class PionexClient {
 
   /// Every perpetual's 24h numbers (`GET /api/v1/market/tickers?type=PERP`,
   /// public, unsigned) - backs Check Now's trending list. Empty on failure.
-  Future<List<PerpTicker>> getPerpTickers() async {
+  Future<List<PerpTicker>> getPerpTickers({bool log = true}) async {
     try {
       _checkNotBanned();
     } catch (_) {
@@ -278,9 +278,11 @@ class PionexClient {
       if (e is RateLimitException) _recordRateLimitHit();
       return const [];
     }
-    _onLog(
-      'PIONEX API GET /api/v1/market/tickers (PERP): ok in ${sw.elapsedMilliseconds}ms',
-    );
+    if (log) {
+      _onLog(
+        'PIONEX API GET /api/v1/market/tickers (PERP): ok in ${sw.elapsedMilliseconds}ms',
+      );
+    }
     if (data['result'] != true) return const [];
     _recordSuccess();
     return [

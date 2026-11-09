@@ -522,6 +522,9 @@ class _ControlsScreenState extends ConsumerState<ControlsScreen> {
                         },
                   market:
                       ref.watch(pionexMarketProvider).value ?? const [],
+                  momentum:
+                      ref.watch(priceMomentumProvider).value?.readings ??
+                      const {},
 
                   // Per the user (2026-09-05, correcting an earlier
                   // misreading): Start is an on-spot check of ONLY the

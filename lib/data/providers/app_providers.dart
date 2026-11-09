@@ -15,6 +15,7 @@ import '../models/bot_history_entry.dart';
 import '../models/trade_start_event.dart';
 import '../pionex/pionex_client.dart';
 import '../pionex/pionex_market.dart';
+import '../pionex/price_momentum.dart';
 
 final storageProvider = Provider<CoreStorage>((ref) => CoreStorage.instance);
 
@@ -88,6 +89,43 @@ final pionexMarketProvider = StreamProvider.autoDispose<List<MarketPair>>((
     await Future<void>.delayed(const Duration(minutes: 1));
   }
 });
+
+/// The Next Trade star sort's data (2026-11-09, per the user): every Pionex
+/// pair's 24h % every 5 seconds, only while Power is on - the 24h % one hour
+/// ago and now, ranked by now - then. Kept alive for the whole app session (not
+/// autoDispose) so leaving the Controls screen doesn't stop the recording.
+/// Saved to disk every minute so a restart keeps the hour.
+final priceMomentumProvider =
+    StreamProvider<({Map<String, ({double then, double now})> readings, Duration span})>((ref) async* {
+      final client = ref.watch(pionexClientProvider);
+      final storage = ref.watch(storageProvider);
+      final repo = ref.watch(controlRepositoryProvider);
+      final momentum = PriceMomentum()
+        ..loadJson(
+          storage.readJsonObject(storage.priceMomentumFile),
+          DateTime.now(),
+        );
+      var lastSave = DateTime.now();
+      yield (readings: momentum.readings(), span: momentum.span);
+      while (true) {
+        if (repo.isPowerOn) {
+          final tickers = await client.getPerpTickers(log: false);
+          final now = DateTime.now();
+          momentum.add(now, {
+            for (final t in tickers)
+              t.symbol: t.changePct,
+          });
+          if (now.difference(lastSave) >= const Duration(minutes: 1)) {
+            lastSave = now;
+            try {
+              storage.writeJson(storage.priceMomentumFile, momentum.toJson());
+            } catch (_) {}
+          }
+          yield (readings: momentum.readings(), span: momentum.span);
+        }
+        await Future<void>.delayed(const Duration(seconds: 5));
+      }
+    });
 
 /// Tails the engine's log file, refreshed on the same cadence as the status.
 final logTailProvider = StreamProvider.autoDispose<List<String>>((ref) async* {

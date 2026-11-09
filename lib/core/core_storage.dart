@@ -43,6 +43,9 @@ class CoreStorage {
   /// app's built-in list when missing.
   String get stockTokensFile => p.join(rootDir, 'stock-tokens.json');
 
+  /// Last hour of Pionex prices for the Next Trade star sort.
+  String get priceMomentumFile => p.join(rootDir, 'price-momentum.json');
+
   /// Held (locked) by the one running GUI - see `GuiInstanceLock`.
   String get guiLockFile => p.join(logsDir, 'gui.lock');
 

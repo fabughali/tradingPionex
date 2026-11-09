@@ -132,6 +132,7 @@ class ReportSection extends StatelessWidget {
     required this.storedCheckupMarkerFor,
     this.blockedByBase = const {},
     this.market = const [],
+    this.momentum = const {},
     this.onVisibleSymbols,
     this.onShowMore,
     this.pionexBalance,
@@ -143,6 +144,9 @@ class ReportSection extends StatelessWidget {
   /// See [PreviewChecklist.market], [PreviewChecklist.onVisibleSymbols] and
   /// [PreviewChecklist.onShowMore] - passed straight through.
   final List<MarketPair> market;
+
+  /// Star sort data: each Pionex symbol's 24h % one hour ago and now.
+  final Map<String, ({double then, double now})> momentum;
   final void Function(List<String> symbols)? onVisibleSymbols;
   final VoidCallback? onShowMore;
 
@@ -304,6 +308,7 @@ class ReportSection extends StatelessWidget {
             isCheckPending: isCheckPending,
             blockedByBase: blockedByBase,
             market: market,
+            momentum: momentum,
             onVisibleSymbols: onVisibleSymbols,
             onShowMore: onShowMore,
           ),
@@ -339,6 +344,7 @@ class PreviewChecklist extends StatefulWidget {
     this.cycleMarkerFor,
     this.blockedByBase = const {},
     this.market = const [],
+    this.momentum = const {},
     this.onVisibleSymbols,
     this.onShowMore,
   });
@@ -349,6 +355,9 @@ class PreviewChecklist extends StatefulWidget {
   /// table lists all of them in the chosen sort, 100 at a time, with each
   /// pair's signal data merged in from [entries].
   final List<MarketPair> market;
+
+  /// See [ReportSection.momentum].
+  final Map<String, ({double then, double now})> momentum;
 
   /// Reports the tradable pairs currently shown, in order - what Check Now
   /// reads.
@@ -416,7 +425,29 @@ class _PreviewChecklistState extends State<PreviewChecklist> {
   int _visibleCount = marketPageSize;
 
   /// The market in the current sort, and the rows of it on screen.
-  List<MarketPair> get _sortedMarket => sortMarket(widget.market, _sort);
+  List<MarketPair> get _sortedMarket {
+    if (_star == 0) return sortMarket(widget.market, _sort);
+    // Star sort (per the user, 2026-11-09): ranked by how much the 24h %
+    // moved in the last hour (now - one hour ago). Filled star: most
+    // positive first; empty star: most negative first. No data yet = last.
+    double? score(MarketPair m) {
+      final r = widget.momentum[m.pionexSymbol];
+      return r == null ? null : r.now - r.then;
+    }
+    final out = [...widget.market];
+    out.sort((a, b) {
+      final sa = score(a), sb = score(b);
+      if (sa == null && sb == null) return 0;
+      if (sa == null) return 1;
+      if (sb == null) return -1;
+      return _star == 1 ? sb.compareTo(sa) : sa.compareTo(sb);
+    });
+    return out;
+  }
+
+  /// Star sort: 0 off, 1 filled star (positive first), 2 empty star
+  /// (negative first).
+  int _star = 0;
 
   /// Immediate local echo of a knob change (keyed by base) - the store
   /// write happens right away via [PreviewChecklist.onCategoryChanged], but
@@ -642,6 +673,30 @@ class _PreviewChecklistState extends State<PreviewChecklist> {
     setState(() => _selected.add(row.base));
   }
 
+  /// The star sort's column: the pair's 24h % one hour ago and now.
+  Widget _momentumCell(BuildContext context, MarketPair? m) {
+    final r = m == null ? null : widget.momentum[m.pionexSymbol];
+    if (r == null) return const Text('—');
+    String f(double v) => '${v >= 0 ? '+' : ''}${v.toStringAsFixed(2)}%';
+    final up = r.now >= r.then;
+    return Text.rich(
+      TextSpan(
+        children: [
+          TextSpan(text: '${f(r.then)} → '),
+          TextSpan(
+            text: f(r.now),
+            style: TextStyle(
+              color: up
+                  ? context.tradingColors.profit
+                  : context.tradingColors.loss,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   /// The 24h move, green up / red down, like Pionex shows it.
   Widget _changeCell(BuildContext context, MarketPair? m) {
     if (m == null) return const Text('—');
@@ -809,7 +864,32 @@ class _PreviewChecklistState extends State<PreviewChecklist> {
                             icon: _sortIcon(_sort),
                             visualDensity: VisualDensity.compact,
                             onPressed: () => setState(() {
-                              _sort = _sort.next;
+                              // Leaving the star sort returns to the current
+                              // sort first; otherwise cycle as before.
+                              if (_star != 0) {
+                                _star = 0;
+                              } else {
+                                _sort = _sort.next;
+                              }
+                              _visibleCount = marketPageSize;
+                            }),
+                          ),
+                          IconButton(
+                            tooltip: switch (_star) {
+                              1 => 'Star: biggest rise in the last hour first - click for biggest drop first',
+                              2 => 'Star: biggest drop in the last hour first - click for biggest rise first',
+                              _ => 'Star: sort by the last hour (24h % then vs now)',
+                            },
+                            icon: Icon(
+                              _star == 1 ? Icons.star : Icons.star_border,
+                              size: 18,
+                              color: _star == 0
+                                  ? null
+                                  : Theme.of(context).colorScheme.primary,
+                            ),
+                            visualDensity: VisualDensity.compact,
+                            onPressed: () => setState(() {
+                              _star = _star == 1 ? 2 : 1;
                               _visibleCount = marketPageSize;
                             }),
                           ),
@@ -822,6 +902,7 @@ class _PreviewChecklistState extends State<PreviewChecklist> {
               // tapping the pair.
               previewDataColumns[0], // Pair
               const DataColumn(label: Text('24h %')),
+              const DataColumn(label: Text('24h %: 1h ago → now')),
               const DataColumn(label: Text('Category')),
               // No Interval column: 1H is the only timeframe (per the user).
               previewDataColumns[2], // Initial investment
@@ -918,6 +999,7 @@ class _PreviewChecklistState extends State<PreviewChecklist> {
                                 context.push('/pair-preview', extra: row.entry),
                     ),
                     DataCell(_changeCell(context, row.market)),
+                    DataCell(_momentumCell(context, row.market)),
                     DataCell(
                       Text(
                         row.market == null
