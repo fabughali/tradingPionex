@@ -425,29 +425,8 @@ class _PreviewChecklistState extends State<PreviewChecklist> {
   int _visibleCount = marketPageSize;
 
   /// The market in the current sort, and the rows of it on screen.
-  List<MarketPair> get _sortedMarket {
-    if (_star == 0) return sortMarket(widget.market, _sort);
-    // Star sort (per the user, 2026-11-09): ranked by how much the 24h %
-    // moved in the last hour (now - one hour ago). Filled star: most
-    // positive first; empty star: most negative first. No data yet = last.
-    double? score(MarketPair m) {
-      final r = widget.momentum[m.pionexSymbol];
-      return r == null ? null : r.now - r.then;
-    }
-    final out = [...widget.market];
-    out.sort((a, b) {
-      final sa = score(a), sb = score(b);
-      if (sa == null && sb == null) return 0;
-      if (sa == null) return 1;
-      if (sb == null) return -1;
-      return _star == 1 ? sb.compareTo(sa) : sa.compareTo(sb);
-    });
-    return out;
-  }
-
-  /// Star sort: 0 off, 1 filled star (positive first), 2 empty star
-  /// (negative first).
-  int _star = 0;
+  List<MarketPair> get _sortedMarket =>
+      sortMarket(widget.market, _sort, momentum: widget.momentum);
 
   /// Immediate local echo of a knob change (keyed by base) - the store
   /// write happens right away via [PreviewChecklist.onCategoryChanged], but
@@ -636,6 +615,9 @@ class _PreviewChecklistState extends State<PreviewChecklist> {
     // Per the user: A–Z is a downward arrow, Z–A an upward arrow.
     MarketSort.aToZ => const Icon(Icons.arrow_downward, size: 18),
     MarketSort.zToA => const Icon(Icons.arrow_upward, size: 18),
+    // Per the user: filled star = biggest rise, empty star = biggest drop.
+    MarketSort.starUp => const Icon(Icons.star, size: 18),
+    MarketSort.starDown => const Icon(Icons.star_border, size: 18),
   };
 
   /// Free balance left for new trades: the app's free balance (Pionex's,
@@ -673,28 +655,12 @@ class _PreviewChecklistState extends State<PreviewChecklist> {
     setState(() => _selected.add(row.base));
   }
 
-  /// The star sort's column: the pair's 24h % one hour ago and now.
+  /// The pair's 24h % at the oldest reading (up to one hour back) and now.
   Widget _momentumCell(BuildContext context, MarketPair? m) {
     final r = m == null ? null : widget.momentum[m.pionexSymbol];
     if (r == null) return const Text('—');
-    String f(double v) => '${v >= 0 ? '+' : ''}${v.toStringAsFixed(2)}%';
-    final up = r.now >= r.then;
-    return Text.rich(
-      TextSpan(
-        children: [
-          TextSpan(text: '${f(r.then)} → '),
-          TextSpan(
-            text: f(r.now),
-            style: TextStyle(
-              color: up
-                  ? context.tradingColors.profit
-                  : context.tradingColors.loss,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-        ],
-      ),
-    );
+    String f(double v) => '${v.toStringAsFixed(2)}%';
+    return Text('${f(r.then)}   ${f(r.now)}');
   }
 
   /// The 24h move, green up / red down, like Pionex shows it.
@@ -864,32 +830,7 @@ class _PreviewChecklistState extends State<PreviewChecklist> {
                             icon: _sortIcon(_sort),
                             visualDensity: VisualDensity.compact,
                             onPressed: () => setState(() {
-                              // Leaving the star sort returns to the current
-                              // sort first; otherwise cycle as before.
-                              if (_star != 0) {
-                                _star = 0;
-                              } else {
-                                _sort = _sort.next;
-                              }
-                              _visibleCount = marketPageSize;
-                            }),
-                          ),
-                          IconButton(
-                            tooltip: switch (_star) {
-                              1 => 'Star: biggest rise in the last hour first - click for biggest drop first',
-                              2 => 'Star: biggest drop in the last hour first - click for biggest rise first',
-                              _ => 'Star: sort by the last hour (24h % then vs now)',
-                            },
-                            icon: Icon(
-                              _star == 1 ? Icons.star : Icons.star_border,
-                              size: 18,
-                              color: _star == 0
-                                  ? null
-                                  : Theme.of(context).colorScheme.primary,
-                            ),
-                            visualDensity: VisualDensity.compact,
-                            onPressed: () => setState(() {
-                              _star = _star == 1 ? 2 : 1;
+                              _sort = _sort.next;
                               _visibleCount = marketPageSize;
                             }),
                           ),
@@ -902,7 +843,7 @@ class _PreviewChecklistState extends State<PreviewChecklist> {
               // tapping the pair.
               previewDataColumns[0], // Pair
               const DataColumn(label: Text('24h %')),
-              const DataColumn(label: Text('24h %: 1h ago → now')),
+              const DataColumn(label: Text('1h')),
               const DataColumn(label: Text('Category')),
               // No Interval column: 1H is the only timeframe (per the user).
               previewDataColumns[2], // Initial investment

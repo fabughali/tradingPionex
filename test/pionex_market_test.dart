@@ -58,7 +58,24 @@ void main() {
     expect(MarketSort.category.next, MarketSort.volume);
     expect(MarketSort.volume.next, MarketSort.aToZ);
     expect(MarketSort.aToZ.next, MarketSort.zToA);
-    expect(MarketSort.zToA.next, MarketSort.gainers);
+    expect(MarketSort.zToA.next, MarketSort.starUp);
+    expect(MarketSort.starUp.next, MarketSort.starDown);
+    expect(MarketSort.starDown.next, MarketSort.gainers);
+  });
+
+  test('star sorts rank by the last hour; pairs with no reading go last', () {
+    final momentum = {
+      'AKE_USDT_PERP': (then: 10.0, now: 12.0), // +2
+      'BTC_USDT_PERP': (then: 1.0, now: 6.0), // +5
+      'UAI_USDT_PERP': (then: 0.0, now: -4.0), // -4
+    };
+    List<String> order(MarketSort s) => sortMarket(
+      tradableMarket(market),
+      s,
+      momentum: momentum,
+    ).map((p) => p.base).toList();
+    expect(order(MarketSort.starUp), ['BTC', 'AKE', 'UAI', 'AAPLX']);
+    expect(order(MarketSort.starDown), ['UAI', 'AKE', 'BTC', 'AAPLX']);
   });
 
   test('each sort orders the pairs as Pionex would', () {

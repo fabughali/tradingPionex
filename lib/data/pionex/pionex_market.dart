@@ -88,7 +88,10 @@ List<MarketPair> tradableMarket(List<MarketPair> market) =>
     [for (final m in market) if (m.category.tradable) m];
 
 /// The table's sort, cycled by its sort icon in this order.
-enum MarketSort { gainers, losers, category, volume, aToZ, zToA }
+/// starUp / starDown (per the user, 2026-11-09): ranked by how much the 24h %
+/// moved in the last hour (now minus the oldest reading) - filled star =
+/// biggest rise first, empty star = biggest drop first.
+enum MarketSort { gainers, losers, category, volume, aToZ, zToA, starUp, starDown }
 
 extension MarketSortX on MarketSort {
   String get label => switch (this) {
@@ -98,6 +101,8 @@ extension MarketSortX on MarketSort {
     MarketSort.volume => 'By 24h volume (Pionex trend)',
     MarketSort.aToZ => 'A to Z',
     MarketSort.zToA => 'Z to A',
+    MarketSort.starUp => 'Biggest rise in the last hour',
+    MarketSort.starDown => 'Biggest drop in the last hour',
   };
 
   MarketSort get next =>
@@ -107,7 +112,25 @@ extension MarketSortX on MarketSort {
 /// Sorts a copy of [pairs]. Category order is USDT-M, COIN-M, Stock token,
 /// Coin futures; within a category, and for the volume sort, the most traded
 /// first.
-List<MarketPair> sortMarket(List<MarketPair> pairs, MarketSort sort) {
+List<MarketPair> sortMarket(
+  List<MarketPair> pairs,
+  MarketSort sort, {
+  Map<String, ({double then, double now})> momentum = const {},
+}) {
+  double? score(MarketPair m) {
+    final r = momentum[m.pionexSymbol];
+    return r == null ? null : r.now - r.then;
+  }
+
+  // No reading yet = last, in either star sort.
+  int byScore(MarketPair a, MarketPair b, {required bool upFirst}) {
+    final sa = score(a), sb = score(b);
+    if (sa == null && sb == null) return 0;
+    if (sa == null) return 1;
+    if (sb == null) return -1;
+    return upFirst ? sb.compareTo(sa) : sa.compareTo(sb);
+  }
+
   int byVolume(MarketPair a, MarketPair b) =>
       b.turnoverUsdt.compareTo(a.turnoverUsdt);
   final out = [...pairs];
@@ -127,6 +150,10 @@ List<MarketPair> sortMarket(List<MarketPair> pairs, MarketSort sort) {
       out.sort((a, b) => a.displayPair.compareTo(b.displayPair));
     case MarketSort.zToA:
       out.sort((a, b) => b.displayPair.compareTo(a.displayPair));
+    case MarketSort.starUp:
+      out.sort((a, b) => byScore(a, b, upFirst: true));
+    case MarketSort.starDown:
+      out.sort((a, b) => byScore(a, b, upFirst: false));
   }
   return out;
 }
