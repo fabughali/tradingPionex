@@ -27,7 +27,6 @@ import '../../widgets/reuse_empty_state.dart';
 import '../../widgets/reuse_error.dart';
 import '../../widgets/reuse_loading_indicator.dart';
 import '../../widgets/reuse_status_light.dart';
-import '../../widgets/report_section.dart';
 import '../../widgets/tier_limit_dialog.dart';
 import '../../widgets/pulsing_dot.dart';
 
@@ -71,45 +70,6 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     }
   }
 
-
-  /// base -> categories with a currently-running auto bot for that exact
-  /// base (2026-09-11, per the user's rule: a pair can only have ONE
-  /// running auto bot per interval - XRPUSDT/1m already running blocks
-  /// starting XRPUSDT/1m again, but never blocks XRPUSDT/1H or 1D). Drives
-  /// the Next Trade table's knob yellow/"blocked" segments. Strips
-  /// Pionex's raw ".PERP" base suffix (same systemic fix as everywhere else
-  /// this session) since `botCategories.categoryOf` keys by buOrderId, not
-  /// base, but the base itself comes straight off the raw GridBot.
-  Map<String, Set<AutoCategory>> _blockedByBase(
-    StatusReport status,
-    EngineControlRepository repo,
-  ) {
-    final result = <String, Set<AutoCategory>>{};
-    for (final g in status.grids.appRunning) {
-      final category = repo.botCategories.categoryOf(g.buOrderId);
-      if (category == null) continue;
-      final bareBase = g.base
-          .toUpperCase()
-          .replaceAll(RegExp(r'\.PERP$', caseSensitive: false), '');
-      (result[bareBase] ??= {}).add(category);
-    }
-    // Per the user (2026-09-11): "if the bot is initiated by user and
-    // still in waiting, the knob in next trade should become yellow as
-    // if it is already started - so user can't re-select it." A base
-    // waiting to open (recycled, or still being retried after Start
-    // skipped it - see waitingBases' own doc) isn't a running bot yet,
-    // but the app is already actively responsible for it, so it gets the
-    // same yellow "blocked" treatment as one that is.
-    for (final w in repo.waitingBases(status.grids.appRunning)) {
-      (result[w.base] ??= {}).add(w.category);
-    }
-    return result;
-  }
-
-  /// Symbols with a category/investment-edit check currently in flight
-  /// (2026-09-10, per the user) - drives the loading spinner in that row's
-  /// Actual investment/Extra margin cells on the Next Trade table.
-  final Set<String> _pendingChecks = {};
 
   /// Gates Check Now/Refresh/Stop-selected/Last-selected - all manual,
   /// on-demand actions that must work independent of Auto's own on/off
@@ -230,7 +190,6 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   }
 
   /// True while Check Now is re-reading Pionex's market list.
-  bool _refreshingMarket = false;
 
   void _notify(String message, {required bool success}) {
     if (!mounted) return;
@@ -725,134 +684,6 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                         ],
                       ],
                     ),
-                  ),
-                  ReportSection(
-                    report: status.lastReport,
-                    engineStatus: status.engineStatus,
-                    freeBalance: status.availableBalance,
-                    pionexBalance: status.balance.free,
-                    canOpenNewGrid: status.canOpenNewGrid,
-                    busy: _actionsBlocked(status, engineProcessAlive),
-                    startLoading: _activeAction == 'start-selected',
-                    // Per the user (2026-09-09): Check now moved here, top
-                    // left of the Next Trade card - it's the button
-                    // responsible for the full Red-list check, so it
-                    // belongs with the pairs data it produces, not under
-                    // Power/Quick Actions.
-                    // Check Now reads Pionex only (per the user, 2026-11-08):
-                    // it refreshes the market list - no TradingView, no
-                    // engine. Signals are read by Start, per selected pair.
-                    // Spinner + disabled until Pionex's list is back.
-                    checkNowLoading: _refreshingMarket,
-                    onCheckNow: _refreshingMarket
-                        ? null
-                        : () async {
-                            setState(() => _refreshingMarket = true);
-                            try {
-                              final pairs = await ref.refresh(
-                                pionexMarketProvider.future,
-                              );
-                              _notify(
-                                'Pionex list refreshed — ${pairs.length} pairs.',
-                                success: true,
-                              );
-                            } catch (e) {
-                              _notify('Could not refresh from Pionex: $e',
-                                  success: false);
-                            } finally {
-                              if (mounted) {
-                                setState(() => _refreshingMarket = false);
-                              }
-                            }
-                          },
-                    market:
-                        ref.watch(pionexMarketProvider).value ?? const [],
-
-                    // Per the user (2026-09-05, correcting an earlier
-                    // misreading): Start is an on-spot check of ONLY the
-                    // selected pair(s) - never a full Red-list sweep.
-                    // Pressing it while Auto is off also means "open these
-                    // now", so it turns Auto on first (same as the Auto
-                    // switch's own turnOn path) before triggering the
-                    // targeted check; whatever Checkup/Auto-checkup pass it
-                    // interrupts resumes automatically once it's done.
-                    onStart: (symbols) => _run('start-selected', () async {
-                      // Start never changes Auto (per the user, 2026-11-08).
-                      // Bug fixed 2026-09-10: requestStartAction blocks
-                      // until the engine actually finishes (or times out),
-                      // so the button's loading/disabled state - driven by
-                      // _run's own busy flag - now genuinely covers the
-                      // whole process, not just the instant it takes to
-                      // write the request file.
-                      final result = await repo.requestStartAction(
-                        symbols,
-                        // Per the user (2026-09-11): "add per-pair
-                        // feedback as each one resolves, instead of one
-                        // big summary at the end" - fires the moment the
-                        // engine's own live progress shows a symbol
-                        // decided, not just once at the very end (which,
-                        // now that Auto categories can pause a Start for
-                        // minutes, could otherwise leave the user staring
-                        // at a spinner with zero feedback the whole time).
-                        // Per the user (2026-09-13): Start no longer opens
-                        // synchronously - "opened" here now means "queued
-                        // for the waiting engine to pick up", not a real
-                        // open yet.
-                        onSymbolResolved: (symbol, {required opened, reason}) {
-                          if (!mounted) return;
-                          _notify(
-                            opened
-                                ? '$symbol queued for the waiting engine.'
-                                : '$symbol skipped: ${reason ?? 'unknown reason'}.',
-                            success: opened,
-                          );
-                        },
-                      );
-                      final opened = (result['opened'] as List?) ?? const [];
-                      final skipped =
-                          (result['skipped'] as Map?) ?? const {};
-                      const autoNote = '';
-                      if (opened.isEmpty && skipped.isEmpty) {
-                        _notify(
-                          '${result['message'] ?? 'Start did not complete.'}$autoNote',
-                          success: result['ok'] == true,
-                        );
-                        return;
-                      }
-                      final parts = <String>[
-                        if (opened.isNotEmpty)
-                          'Queued for the waiting engine: ${opened.join(', ')}.',
-                        if (skipped.isNotEmpty)
-                          'Skipped: ${skipped.entries.map((e) => '${e.key} (${e.value})').join(', ')}.',
-                      ];
-                      _notify(
-                        '${parts.join(' ')}$autoNote',
-                        success: opened.isNotEmpty,
-                      );
-                    }),
-                    categoryOf: (symbol) =>
-                        repo.pairCategories.categoryOf(symbol),
-                    onCategoryChanged: (symbol, category) {
-                      // Per the user (2026-09-10, correcting 2026-09-09):
-                      // switching the knob must NOT pull fresh Pionex data
-                      // - report.entries already carries every category's
-                      // own data (kept fresh by the ongoing background
-                      // report, independent of this), so the row's display
-                      // switches instantly from what's already known. Only
-                      // persist the pick for the engine to use next Start.
-                      repo.setPairCategory(symbol, category);
-                    },
-                    investmentOf: (symbol) =>
-                        repo.pairInvestments.investmentOf(symbol),
-                    // Saves only (per the user, 2026-11-07: no automatic
-                    // checks in Next Trade) - the amount is used when the pair
-                    // is next started.
-                    onInvestmentChanged: (symbol, amount, category, hasData) =>
-                        repo.setPairInvestment(symbol, amount),
-                    isCheckPending: (symbol) => _pendingChecks.contains(symbol),
-                    storedCheckupMarkerFor: (base) =>
-                        repo.checkupCycleMarkerFor(base),
-                    blockedByBase: _blockedByBase(status, repo),
                   ),
                   ReuseCard(
                     // Bug fixed 2026-09-19, per the user ("all auto switches

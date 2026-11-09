@@ -10,21 +10,14 @@ import '../../data/models/grid_bot.dart';
 import '../../data/models/preview_grid_pair.dart';
 import '../../data/providers/app_providers.dart';
 import '../../l10n/app_localizations.dart';
-import '../../widgets/auto_category_switches.dart';
 import '../../widgets/category_knob.dart';
-import '../../widgets/grids_table.dart';
-import '../../widgets/pnl_summary_view.dart';
 import '../../widgets/reuse_button.dart';
-import '../../widgets/waiting_bases_view.dart';
 import '../../widgets/reuse_card.dart';
 import '../../widgets/reuse_chip.dart';
 import '../../widgets/reuse_error.dart';
 import '../../widgets/reuse_data_table.dart';
 import '../../widgets/reuse_loading_indicator.dart';
-import '../../widgets/report_section.dart'
-    show previewDataColumns, previewComputedCells;
-import '../../widgets/pulsing_dot.dart';
-import '../../widgets/tier_limit_dialog.dart';
+import '../../widgets/report_section.dart';
 
 class ControlsScreen extends ConsumerStatefulWidget {
   const ControlsScreen({super.key});
@@ -38,64 +31,6 @@ class _ControlsScreenState extends ConsumerState<ControlsScreen> {
   /// shows a spinner; every button is disabled while any action is running.
   String? _activeAction;
   bool get _busy => _activeAction != null;
-
-  /// The `buOrderId` of the row whose "Last" toggle was just switched off
-  /// (2026-09-11, per the user) - drives that row's spinner while
-  /// `EngineControlRepository.unretire` runs.
-  String? _cancelLastRowId;
-
-  Future<void> _cancelLast(GridBot bot) async {
-    final repo = ref.read(controlRepositoryProvider);
-    setState(() => _cancelLastRowId = bot.buOrderId);
-    try {
-      final bareBase = bot.base
-          .toUpperCase()
-          .replaceAll(RegExp(r'\.PERP$', caseSensitive: false), '');
-      final category =
-          repo.botCategories.categoryOf(bot.buOrderId) ?? AutoCategory.oneHour;
-      await repo.unretire([bareBase], category);
-      ref.invalidate(statusReportProvider);
-      ref.invalidate(botHistoryProvider);
-      _notify('${bot.pairKey}: "Last" cancelled — back to auto-recreating.', success: true);
-    } catch (e) {
-      _notify('$e', success: false);
-    } finally {
-      if (mounted) setState(() => _cancelLastRowId = null);
-    }
-  }
-
-  /// A single Auto engine's (1m/1H/1D) own on/off switch (2026-09-07) -
-  /// independent of the master Auto switch above, and of the other 2
-  /// categories. ON: resumes that category and forces an immediate check on
-  /// its own auto-managed bases. OFF: per the user (2026-09-09), mirrors
-  /// the master Auto-off flow but scoped to just THIS category's own
-  /// running bots - offers picking which of them become "Last" before
-  /// actually pausing that one category.
-  ///
-  /// Copied verbatim from `dashboard_screen.dart` (2026-09-12, per the
-  /// user: "auto card in controls screen should match 100% as in
-  /// dashboard") - kept as an exact duplicate rather than extracted into a
-  /// shared widget/mixin, matching the scope of what was actually asked.
-  void _setAutoCategory(
-    EngineControlRepository repo,
-    StatusReport status,
-    AutoCategory category,
-    bool turnOn,
-  ) {
-    _run('auto-${category.wireValue}', () async {
-      if (turnOn) {
-        repo.resumeCategory(category);
-        repo.triggerAutoCheckupFor(category);
-        _notify(
-          'Auto[${category.label}] resumed — checking now.',
-          success: true,
-        );
-      } else {
-        repo.pauseCategory(category);
-        _notify('Auto[${category.label}] paused.', success: true);
-      }
-    });
-  }
 
 
   /// base -> categories with a currently-running auto bot for that exact
@@ -134,6 +69,9 @@ class _ControlsScreenState extends ConsumerState<ControlsScreen> {
   /// Actual investment/Extra margin cells, on both the Next Trade table
   /// and the single-pair Check card below.
   final Set<String> _pendingChecks = {};
+
+  /// Check Now's spinner while Pionex's list refreshes.
+  bool _refreshingMarket = false;
 
   /// Gates every manual, on-demand action on this screen (Check/Add/Remove/
   /// Start/Last/Stop, Stop-selected/Last-selected) - these must work
@@ -293,38 +231,6 @@ class _ControlsScreenState extends ConsumerState<ControlsScreen> {
     }
   }
 
-  /// Confirms before resetting the P&L summary cutoff (2026-09-15, per the
-  /// user) - same pattern as Dashboard's own `_confirmResetPnl` and
-  /// `HistoryScreen._confirmClearAll`. Only moves the summary's cutoff
-  /// forward - the underlying History record is never touched.
-  Future<void> _confirmResetPnl(EngineControlRepository repo) async {
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Reset P&L summary'),
-        content: const Text(
-          'Start this summary fresh from now? Past closed bots stay in '
-          'History untouched - this only moves the sum\'s starting point '
-          'forward.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Reset'),
-          ),
-        ],
-      ),
-    );
-    if (ok == true) {
-      repo.resetPnlSummary();
-      if (mounted) setState(() {});
-    }
-  }
-
   void _notify(String message, {required bool success}) {
     if (!mounted) return;
     final messenger = ScaffoldMessenger.of(context);
@@ -341,7 +247,6 @@ class _ControlsScreenState extends ConsumerState<ControlsScreen> {
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context)!;
     final repo = ref.watch(controlRepositoryProvider);
-    final pnl = repo.pnlSummary();
     final statusAsync = ref.watch(statusReportProvider);
     final engineProcessAlive = repo.isEngineProcessAlive;
 
@@ -576,218 +481,133 @@ class _ControlsScreenState extends ConsumerState<ControlsScreen> {
                     ],
                   ),
                 ),
-                ReuseCard(
-                  // Per the user (2026-09-12): "auto card in controls screen
-                  // should match 100% as in dashboard" - kept in lockstep
-                  // with dashboard_screen.dart's own matching card,
-                  // including its 2026-09-19 header restructuring (title
-                  // text + AutoCategorySwitches share their own left
-                  // column, independent of PnlSummaryView's height on the
-                  // right) - see that file's matching comment for the full
-                  // "why" (the summary widget growing a 3rd row used to
-                  // push these toggles down via ReuseCard's shared
-                  // title-row sizing).
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: CoreSpacing.sm),
-                        child: Row(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Row(
-                                    children: [
-                                      PulsingDot(
-                                        alive:
-                                            status.grids.appRunning.isNotEmpty,
-                                      ),
-                                      const SizedBox(width: CoreSpacing.sm),
-                                      Expanded(
-                                        child: Text(
-                                          'Auto bots: ${status.grids.appRunning.length}',
-                                          overflow: TextOverflow.ellipsis,
-                                          maxLines: 1,
-                                          style: Theme.of(
-                                            context,
-                                          ).textTheme.titleMedium,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                  AutoCategorySwitches(
-                                    engineStatus: status.engineStatus,
-                                    nextCheckupEtaFor:
-                                        status.nextCheckupEtaFor,
-                                    busy: _busy,
-                                    masterActive:
-                                        !status.paused,
-                                    onToggle: (category, turnOn) =>
-                                        _setAutoCategory(
-                                          repo,
-                                          status,
-                                          category,
-                                          turnOn,
-                                        ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                            PnlSummaryView(
-                              profit: pnl.profit,
-                              loss: pnl.loss,
-                              net: pnl.net,
-                              profitCount: pnl.profitCount,
-                              lossCount: pnl.lossCount,
-                              neutralCount: pnl.neutralCount,
-                              successRatePercent: pnl.successRatePercent,
-                              since: pnl.since,
-                              onReset: () => _confirmResetPnl(repo),
-                              onSummaryTap: () => context.push('/pnl-summary'),
-                            ),
-                          ],
-                        ),
-                      ),
-                      const Divider(height: CoreSpacing.md),
-                      GridsTable(
-                    grids: status.grids.appRunning,
-                    // Bug fixed 2026-09-16, per the user: same fix as
-                    // dashboard_screen.dart's matching GridsTable - was
-                    // gated only on `_busy`, never on the engine process
-                    // being alive, so Stop/Last/Convert stayed clickable
-                    // with Power off.
-                    busy: _actionsBlocked(status, engineProcessAlive),
-                    emptyMessage: 'No running auto bots right now.',
-                    categoryOf: (id) => repo.botCategories.categoryOf(id),
-                    entrySignalFor: (id) => repo.entrySignalFor(id),
-                    closeCandidateFor: repo.closeCandidateFor,
-                    cycleMarkerFor: (bot) {
-                      final category = repo.botCategories.categoryOf(
-                        bot.buOrderId,
-                      );
-                      if (category == null) return null;
-                      final bareBase = bot.base
-                          .toUpperCase()
-                          .replaceAll(RegExp(r'\.PERP$', caseSensitive: false), '');
-                      final stored = repo.cycleMarkerFor(bareBase, category);
-                      final current = status.engineStatus
-                          .statusFor(category)
-                          .cycleMarkerIndex;
-                      if (stored == null || stored != current) return null;
-                      return category.cycleMarkerFor(current);
-                    },
-                    lastMarkedBases: repo.retiredBases(),
-                    onCancelLast: _cancelLast,
-                    cancelLastActiveRowId: _cancelLastRowId,
-                    onBulkStop: (bots) => _run(
-                      'stop-selected',
-                      () async {
-                        await repo.stopByBases(
-                          bots.map((b) => b.base).toList(),
-                        );
-                      },
-                      successMessage: 'Stopped ${bots.length} bot(s).',
-                    ),
-                    onBulkLast: (bots) => _run(
-                      'last-selected',
-                      () async {
-                        await repo.lastSelectByIds(
-                          bots.map((b) => b.buOrderId).toList(),
-                        );
-                      },
-                      successMessage:
-                          'Retired ${bots.length} bot(s) — will finish naturally and never auto-recreate.',
-                    ),
-                    onBulkConvertToManual: (bots) => _run(
-                      'convert-to-manual-selected',
-                      () async {
-                        for (final bot in bots) {
-                          await repo.convertAutoToManual(bot.buOrderId);
-                        }
-                        ref.invalidate(statusReportProvider);
-                      },
-                      successMessage:
-                          'Converted ${bots.length} bot(s) to manual.',
-                    ),
-                  ),
-                      WaitingBasesView(
-                        waiting: repo.waitingBases(
-                          status.grids.appRunning,
-                          triedBases:
-                              status.engineStatus.waitingEngineTriedBases,
-                        ),
-                        waitingEngineCurrentBase:
-                            status.engineStatus.waitingEngineCurrentBase,
-                        waitingEngineIdleReason:
-                            status.engineStatus.waitingEngineIdleReason,
-                        onStop: (base, category) => _run(
-                          'stop-waiting-$base-${category.wireValue}',
-                          () => repo.stopWaitingBase(base, category),
-                          successMessage:
-                              'Stopped ${base}USDT/${category.label} - removed from waiting.',
-                        ),
-                        onIgnite: (base, category) => _run(
-                          'ignite-$base-${category.wireValue}',
-                          () async {
-                            var result = await repo.igniteBase(
-                              base,
-                              category,
+                ReportSection(
+                  report: status.lastReport,
+                  engineStatus: status.engineStatus,
+                  freeBalance: status.availableBalance,
+                  pionexBalance: status.balance.free,
+                  canOpenNewGrid: status.canOpenNewGrid,
+                  busy: _actionsBlocked(status, engineProcessAlive),
+                  startLoading: _activeAction == 'start-selected',
+                  // Per the user (2026-09-09): Check now moved here, top
+                  // left of the Next Trade card - it's the button
+                  // responsible for the full Red-list check, so it
+                  // belongs with the pairs data it produces, not under
+                  // Power/Quick Actions.
+                  // Check Now reads Pionex only (per the user, 2026-11-08):
+                  // it refreshes the market list - no TradingView, no
+                  // engine. Signals are read by Start, per selected pair.
+                  // Spinner + disabled until Pionex's list is back.
+                  checkNowLoading: _refreshingMarket,
+                  onCheckNow: _refreshingMarket
+                      ? null
+                      : () async {
+                          setState(() => _refreshingMarket = true);
+                          try {
+                            final pairs = await ref.refresh(
+                              pionexMarketProvider.future,
                             );
-                            // Pionex account-tier limit (2026-09-16, per
-                            // the user, confirmed live via Pionex's own
-                            // "Creation failed" dialog): once an account
-                            // holds more than 20 total bots, Pionex
-                            // requires investment above $50. If that's
-                            // exactly why this refused, offer to bump this
-                            // pair to $51 (per the user: "make it 51 usdt
-                            // instead of 50" - genuinely clears Pionex's
-                            // own "more than 50" wording) and retry, with
-                            // a 5s auto-decline per the user's exact spec
-                            // - a real, timely yes is required, nothing is
-                            // forced silently.
-                            final message = '${result['message'] ?? ''}';
-                            if (result['ok'] != true &&
-                                message.contains('requires investment over') &&
-                                mounted &&
-                                context.mounted) {
-                              final wouldBeBotNumber =
-                                  status.grids.appRunning.length +
-                                  status.grids.manualRunning.length +
-                                  1;
-                              final symbol = '${base}USDT';
-                              final agreed = await showTierLimitInvestmentDialog(
-                                context,
-                                symbol: symbol,
-                                wouldBeBotNumber: wouldBeBotNumber,
-                                bumpedInvestment: 51,
-                              );
-                              if (agreed) {
-                                repo.setPairInvestment(symbol, 51);
-                                result = await repo.igniteBase(base, category);
-                              }
-                            }
-                            // Per the user: "if reading (data from trading
-                            // view, pionex) fails, it stays in waiting
-                            // with snackbar message" - notified directly
-                            // (not via _run's throw/catch) so the snackbar
-                            // shows the engine's own real reason, not a
-                            // generic "Exception: " wrapper.
                             _notify(
-                              '${result['message'] ?? 'Ignite failed for an unknown reason.'}',
-                              success: result['ok'] == true,
+                              'Pionex list refreshed — ${pairs.length} pairs.',
+                              success: true,
                             );
-                          },
-                        ),
-                        isIgniting: (base, category) =>
-                            _activeAction == 'ignite-$base-${category.wireValue}',
-                        anyIgniteInFlight:
-                            _activeAction?.startsWith('ignite-') ?? false,
-                      ),
-                    ],
-                  ),
+                          } catch (e) {
+                            _notify('Could not refresh from Pionex: $e',
+                                success: false);
+                          } finally {
+                            if (mounted) {
+                              setState(() => _refreshingMarket = false);
+                            }
+                          }
+                        },
+                  market:
+                      ref.watch(pionexMarketProvider).value ?? const [],
+
+                  // Per the user (2026-09-05, correcting an earlier
+                  // misreading): Start is an on-spot check of ONLY the
+                  // selected pair(s) - never a full Red-list sweep.
+                  // Pressing it while Auto is off also means "open these
+                  // now", so it turns Auto on first (same as the Auto
+                  // switch's own turnOn path) before triggering the
+                  // targeted check; whatever Checkup/Auto-checkup pass it
+                  // interrupts resumes automatically once it's done.
+                  onStart: (symbols) => _run('start-selected', () async {
+                    // Start never changes Auto (per the user, 2026-11-08).
+                    // Bug fixed 2026-09-10: requestStartAction blocks
+                    // until the engine actually finishes (or times out),
+                    // so the button's loading/disabled state - driven by
+                    // _run's own busy flag - now genuinely covers the
+                    // whole process, not just the instant it takes to
+                    // write the request file.
+                    final result = await repo.requestStartAction(
+                      symbols,
+                      // Per the user (2026-09-11): "add per-pair
+                      // feedback as each one resolves, instead of one
+                      // big summary at the end" - fires the moment the
+                      // engine's own live progress shows a symbol
+                      // decided, not just once at the very end (which,
+                      // now that Auto categories can pause a Start for
+                      // minutes, could otherwise leave the user staring
+                      // at a spinner with zero feedback the whole time).
+                      // Per the user (2026-09-13): Start no longer opens
+                      // synchronously - "opened" here now means "queued
+                      // for the waiting engine to pick up", not a real
+                      // open yet.
+                      onSymbolResolved: (symbol, {required opened, reason}) {
+                        if (!mounted) return;
+                        _notify(
+                          opened
+                              ? '$symbol queued for the waiting engine.'
+                              : '$symbol skipped: ${reason ?? 'unknown reason'}.',
+                          success: opened,
+                        );
+                      },
+                    );
+                    final opened = (result['opened'] as List?) ?? const [];
+                    final skipped =
+                        (result['skipped'] as Map?) ?? const {};
+                    const autoNote = '';
+                    if (opened.isEmpty && skipped.isEmpty) {
+                      _notify(
+                        '${result['message'] ?? 'Start did not complete.'}$autoNote',
+                        success: result['ok'] == true,
+                      );
+                      return;
+                    }
+                    final parts = <String>[
+                      if (opened.isNotEmpty)
+                        'Queued for the waiting engine: ${opened.join(', ')}.',
+                      if (skipped.isNotEmpty)
+                        'Skipped: ${skipped.entries.map((e) => '${e.key} (${e.value})').join(', ')}.',
+                    ];
+                    _notify(
+                      '${parts.join(' ')}$autoNote',
+                      success: opened.isNotEmpty,
+                    );
+                  }),
+                  categoryOf: (symbol) =>
+                      repo.pairCategories.categoryOf(symbol),
+                  onCategoryChanged: (symbol, category) {
+                    // Per the user (2026-09-10, correcting 2026-09-09):
+                    // switching the knob must NOT pull fresh Pionex data
+                    // - report.entries already carries every category's
+                    // own data (kept fresh by the ongoing background
+                    // report, independent of this), so the row's display
+                    // switches instantly from what's already known. Only
+                    // persist the pick for the engine to use next Start.
+                    repo.setPairCategory(symbol, category);
+                  },
+                  investmentOf: (symbol) =>
+                      repo.pairInvestments.investmentOf(symbol),
+                  // Saves only (per the user, 2026-11-07: no automatic
+                  // checks in Next Trade) - the amount is used when the pair
+                  // is next started.
+                  onInvestmentChanged: (symbol, amount, category, hasData) =>
+                      repo.setPairInvestment(symbol, amount),
+                  isCheckPending: (symbol) => _pendingChecks.contains(symbol),
+                  storedCheckupMarkerFor: (base) =>
+                      repo.checkupCycleMarkerFor(base),
+                  blockedByBase: _blockedByBase(status, repo),
                 ),
               ],
             ),
