@@ -3834,12 +3834,9 @@ class EngineService {
     const category = AutoCategory.oneHour;
     final base = _baseOf(symbol);
     final entryKey = '${_gridKey(base)}|${category.wireValue}';
-    final event = await _confirmedWorm10Event(
-      entryKey,
-      symbol,
-      category,
-      immediate: true,
-    );
+    // The hybrid decision exactly as Auto uses it (per the user: no change),
+    // including its wait for the signal's candle plus one more candle.
+    final event = await _confirmedWorm10Event(entryKey, symbol, category);
     final want = short ? Worm10EventKind.sellOpen1 : Worm10EventKind.buyOpen1;
     if (event == null || event.kind != want) {
       logger.log(
