@@ -82,6 +82,9 @@ class FavoriteTradesStore {
   DateTime? _nextCheckAt;
   final Set<String> _basesToday = {};
 
+  /// Bots opened as favorite trades (kept across days) - shown with a star.
+  final Set<String> _botIds = {};
+
   void _load() {
     try {
       final raw = _storage.readJsonObject(_storage.favoriteTradesFile);
@@ -94,6 +97,9 @@ class FavoriteTradesStore {
       for (final b in (raw['bases'] as List?) ?? const []) {
         _basesToday.add('$b');
       }
+      for (final id in (raw['botIds'] as List?) ?? const []) {
+        _botIds.add('$id');
+      }
     } catch (_) {}
   }
 
@@ -104,6 +110,7 @@ class FavoriteTradesStore {
       'longs': _longs,
       if (_nextCheckAt != null) 'nextCheckAt': _nextCheckAt!.toIso8601String(),
       'bases': _basesToday.toList(),
+      'botIds': _botIds.toList(),
     });
   }
 
@@ -145,6 +152,10 @@ class FavoriteTradesStore {
   }
 
   DateTime? get nextCheckAt => _nextCheckAt;
+
+  void markFavoriteBot(String buOrderId) {
+    if (_botIds.add(buOrderId)) _persist();
+  }
 
   void recordOpened(String base, {required bool short, required DateTime now}) {
     _roll(now);

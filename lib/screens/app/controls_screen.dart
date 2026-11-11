@@ -261,7 +261,7 @@ class _ControlsScreenState extends ConsumerState<ControlsScreen> {
                   report: status.lastReport,
                   engineStatus: status.engineStatus,
                   freeBalance: status.availableBalance,
-                  pionexBalance: status.balance.free,
+                  pionexBalance: status.walletBalance,
                   canOpenNewGrid: status.canOpenNewGrid,
                   busy: _actionsBlocked(status, engineProcessAlive),
                   startLoading: _activeAction == 'start-selected',

@@ -57,6 +57,7 @@ class StatusReport {
     required this.lastReport,
     required this.runningBotsReport,
     required this.availableBalance,
+    this.walletBalance = 0,
   });
   final bool paused;
   final bool killSwitchPresent;
@@ -83,6 +84,12 @@ class StatusReport {
   /// honest, raw Pionex-reported value, in case anything else ever needs
   /// it.
   final double availableBalance;
+
+  /// The whole Pionex wallet in USDT (per the user, 2026-11-11): the trading
+  /// account (free + frozen) plus every running bot's money - its investment
+  /// including extra margin, plus its current P&L. Pionex's balance call only
+  /// returns the trading account, so this is summed here.
+  final double walletBalance;
 
   /// Auto's own candle-gate anchor plus one hour - per the user
   /// (2026-09-05/06), Auto is the only track with a real recurring
@@ -453,6 +460,7 @@ class EngineControlRepository {
       killSwitchPresent: isKillSwitched,
       balance: bal,
       availableBalance: availableBalance,
+      walletBalance: _walletBalance(bal, grids),
       // Bug fixed 2026-09-10, per the user ("i want balance green"): this
       // used to require the flat $10 new-pair floor
       // (CoreConstants.newPairMinFreeUsdt), which was accurate when every
@@ -598,6 +606,17 @@ class EngineControlRepository {
   }
 
   /// Whether the user has Power on (see [CoreStorage.powerOnFile]).
+  double _walletBalance(Balance bal, GridSnapshot grids) {
+    var sum = bal.total > bal.free ? bal.total : bal.free;
+    for (final g in [...grids.appRunning, ...grids.manualRunning]) {
+      final money =
+          g.initialInvestment ??
+          ((g.actualInvestment ?? 0) + (g.extraMargin ?? 0));
+      sum += money + (g.profitAmount ?? 0);
+    }
+    return sum;
+  }
+
   bool get isPowerOn => _storage.fileExists(_storage.powerOnFile);
 
   /// USDT the engine's SLL took out of bots' margin for a top-up that is not
@@ -1770,6 +1789,24 @@ class EngineControlRepository {
     final map = _storage.readJsonObject(_storage.cycleMarkersFile);
     final value = map?['${base.toUpperCase()}|${category.wireValue}'];
     return (value as num?)?.toInt();
+  }
+
+  /// True if the engine's hourly Auto check read this pair in the current
+  /// UTC hour - the Auto card's check mark (per the user, 2026-11-11, same
+  /// as tradingMT5).
+  bool checkedThisHour(String base, AutoCategory category) {
+    final map = _storage.readJsonObject(_storage.cycleMarkersFile);
+    final at = map?['${base.toUpperCase()}|${category.wireValue}|at'];
+    if (at is! num) return false;
+    final now = DateTime.now().toUtc();
+    final hourStart = DateTime.utc(now.year, now.month, now.day, now.hour);
+    return at.toInt() >= hourStart.millisecondsSinceEpoch;
+  }
+
+  /// Bots the engine opened as favorite trades - shown with a star.
+  Set<String> favoriteBotIds() {
+    final raw = _storage.readJsonObject(_storage.favoriteTradesFile);
+    return {for (final id in (raw?['botIds'] as List?) ?? const []) '$id'};
   }
 
   /// Same idea as [cycleMarkerFor], for the Checkup track (2026-09-12, per

@@ -15,7 +15,6 @@ import '../../l10n/app_localizations.dart';
 import '../../utilities/util_date.dart';
 import '../../utilities/util_string.dart';
 import '../../widgets/power_off_confirm.dart';
-import '../../widgets/auto_category_switches.dart';
 import '../../widgets/category_knob.dart';
 import '../../widgets/countdown_text.dart';
 import '../../widgets/grids_table.dart';
@@ -38,6 +37,14 @@ class DashboardScreen extends ConsumerStatefulWidget {
 }
 
 class _DashboardScreenState extends ConsumerState<DashboardScreen> {
+  @override
+  void initState() {
+    super.initState();
+    // The 1H toggle is gone (per the user, 2026-11-11): Auto always runs 1H,
+    // so a 1H pause left over from before is cleared.
+    ref.read(controlRepositoryProvider).resumeCategory(AutoCategory.oneHour);
+  }
+
   /// Which action is currently in flight, if any — only that action's button
   /// shows a spinner; every button is disabled while any action is running
   /// (so two actions can never race each other), but only the one actually
@@ -343,34 +350,6 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     });
   }
 
-  /// A single Auto engine's (1m/1H/1D) own on/off switch (2026-09-07) -
-  /// independent of the master Auto switch above, and of the other 2
-  /// categories. ON: resumes that category and forces an immediate check on
-  /// its own auto-managed bases. OFF: per the user (2026-09-09), mirrors
-  /// the master Auto-off flow but scoped to just THIS category's own
-  /// running bots - offers picking which of them become "Last" before
-  /// actually pausing that one category.
-  void _setAutoCategory(
-    EngineControlRepository repo,
-    StatusReport status,
-    AutoCategory category,
-    bool turnOn,
-  ) {
-    _run('auto-${category.wireValue}', () async {
-      if (turnOn) {
-        repo.resumeCategory(category);
-        repo.triggerAutoCheckupFor(category);
-        _notify(
-          'Auto[${category.label}] resumed — checking now.',
-          success: true,
-        );
-      } else {
-        repo.pauseCategory(category);
-        _notify('Auto[${category.label}] paused.', success: true);
-      }
-    });
-  }
-
 
   @override
   Widget build(BuildContext context) {
@@ -444,7 +423,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         Text(
-                          'Balance: ${UtilString.usd(status.balance.free)}   '
+                          'Pionex balance: ${UtilString.usd(status.walletBalance)}   '
                           'Free for new trades: ',
                           style: Theme.of(context).textTheme.titleMedium,
                         ),
@@ -732,30 +711,6 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                                         ),
                                       ],
                                     ),
-                                    // Per the user (2026-09-12): "shift the
-                                    // 3 toggles 3m/1H/1D into auto card. so
-                                    // i can watch the status of each toggle
-                                    // along with list of auto bots" - moved
-                                    // here from the Engine card above, right
-                                    // above the running-bots table, so the
-                                    // per-category status/countdown and the
-                                    // bots they actually manage are visible
-                                    // together in one card.
-                                    AutoCategorySwitches(
-                                      engineStatus: status.engineStatus,
-                                      nextCheckupEtaFor:
-                                          status.nextCheckupEtaFor,
-                                      busy: _busy,
-                                      masterActive:
-                                          !status.paused,
-                                      onToggle: (category, turnOn) =>
-                                          _setAutoCategory(
-                                            repo,
-                                            status,
-                                            category,
-                                            turnOn,
-                                          ),
-                                    ),
                                   ],
                                 ),
                               ),
@@ -801,21 +756,20 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                       // shows nothing) means "not checked yet this
                       // interval" - exactly the "assure if all list get
                       // checked" signal asked for.
+                      // Check mark once the hourly Auto check has read this
+                      // pair in the current UTC hour (same as tradingMT5).
                       cycleMarkerFor: (bot) {
-                        final category = repo.botCategories.categoryOf(
-                          bot.buOrderId,
-                        );
-                        if (category == null) return null;
                         final bareBase = bot.base
                             .toUpperCase()
                             .replaceAll(RegExp(r'\.PERP$', caseSensitive: false), '');
-                        final stored = repo.cycleMarkerFor(bareBase, category);
-                        final current = status.engineStatus
-                            .statusFor(category)
-                            .cycleMarkerIndex;
-                        if (stored == null || stored != current) return null;
-                        return category.cycleMarkerFor(current);
+                        final category =
+                            repo.botCategories.categoryOf(bot.buOrderId) ??
+                            AutoCategory.oneHour;
+                        return repo.checkedThisHour(bareBase, category)
+                            ? '✓'
+                            : null;
                       },
+                      favoriteIds: repo.favoriteBotIds(),
                       lastMarkedBases: repo.retiredBases(),
                       onCancelLast: _cancelLast,
                       cancelLastActiveRowId: _cancelLastRowId,

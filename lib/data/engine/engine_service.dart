@@ -1053,6 +1053,9 @@ class EngineService {
         storage.readJsonObject(storage.cycleMarkersFile) ??
         <String, dynamic>{};
     current[key] = _cycleMarkerIndex[category] ?? 0;
+    // When it was checked - the dashboard shows a check mark for pairs
+    // checked in the current UTC hour (per the user, 2026-11-11).
+    current['$key|at'] = DateTime.now().millisecondsSinceEpoch;
     storage.writeJson(storage.cycleMarkersFile, current);
   }
 
@@ -3891,6 +3894,8 @@ class EngineService {
     }
     // Last: once it closes, for any reason, it never reopens.
     retired.addRetiredBases([(base: base, category: category)]);
+    final newId = _openEntryByPair[entryKey]?.buOrderId;
+    if (newId != null) favoriteTrades.markFavoriteBot(newId);
     await _refreshActiveGrids();
     logger.log(
       'FAVORITE $symbol: opened ${short ? 'SHORT' : 'LONG'} \$'

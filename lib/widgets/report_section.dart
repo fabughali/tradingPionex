@@ -231,7 +231,7 @@ class ReportSection extends StatelessWidget {
     final textTheme = Theme.of(context).textTheme;
     return ReuseCard(
       // 1H is the only timeframe, so the title shows just the count.
-      title: 'Next Trade: ${report.entries.length}',
+      title: 'Next Trade: ${market.length} pairs',
       // Per the user (2026-09-09): the standalone Balance card is gone -
       // shown here, inline on the same row as this card's own title (same
       // text size as the Engine card's copy of it), and again opposite
@@ -242,7 +242,7 @@ class ReportSection extends StatelessWidget {
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Text('Balance: ', style: textTheme.titleMedium),
+          Text('Pionex balance: ', style: textTheme.titleMedium),
           Text(
             UtilString.usd(pionexBalance ?? freeBalance),
             style: textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),

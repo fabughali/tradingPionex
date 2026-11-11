@@ -47,7 +47,11 @@ class GridsTable extends StatefulWidget {
     this.entrySignalFor,
     this.closeCandidateFor,
     this.asCards = false,
+    this.favoriteIds = const {},
   });
+
+  /// Bots opened as favorite trades - a star on their card.
+  final Set<String> favoriteIds;
 
   /// tradingMT5-style running cards instead of the table (Auto bots).
   final bool asCards;
@@ -819,6 +823,28 @@ class _GridsTableState extends State<GridsTable> {
                   ),
                 ),
               ),
+              if (widget.cycleMarkerFor?.call(g) case final mark?)
+                Padding(
+                  padding: const EdgeInsets.only(left: 4),
+                  child: Tooltip(
+                    message: 'Checked this hour',
+                    child: Text(
+                      mark,
+                      style: TextStyle(
+                        color: trading.profit,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                ),
+              if (widget.favoriteIds.contains(g.buOrderId))
+                const Padding(
+                  padding: EdgeInsets.only(left: 4),
+                  child: Tooltip(
+                    message: 'Favorite trade',
+                    child: Icon(Icons.star, size: 16, color: Colors.amber),
+                  ),
+                ),
               if (g.trend != null)
                 badge(
                   long ? 'LONG' : 'SHORT',

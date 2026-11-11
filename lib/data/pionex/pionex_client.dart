@@ -307,7 +307,10 @@ class PionexClient {
     if (found == null) return Balance.zero;
     return Balance(
       free: _num(found['available'] ?? found['free'] ?? found['amount']) ?? 0,
-      total: _num(found['total'] ?? found['balance']) ?? 0,
+      // Pionex sends free + frozen (no total field).
+      total:
+          _num(found['total'] ?? found['balance']) ??
+          ((_num(found['free']) ?? 0) + (_num(found['frozen']) ?? 0)),
     );
   }
 
