@@ -6451,6 +6451,7 @@ class EngineService {
         if (id == null || !createdBots.isAppInitiated(id)) continue;
         final bot = GridBot.fromPionexOrder(raw, appInitiated: true);
         if (bot.isManuallyInterrupted) continue;
+        _ensureOnAutoList(bot);
         try {
           await _sllCheck(bot);
         } catch (e) {
@@ -6468,6 +6469,25 @@ class EngineService {
   }
 
   bool _sllRunning = false;
+
+  /// Every running Auto bot follows the same rules (per the user,
+  /// 2026-11-11): its pair is always on Auto's list, so the hourly hybrid
+  /// check and Close A/B cover it. The app keeps this true by itself - a
+  /// running Auto bot found off the list is put back on it.
+  void _ensureOnAutoList(GridBot bot) {
+    final category =
+        botCategories.categoryOf(bot.buOrderId) ?? AutoCategory.oneHour;
+    final base = bot.base
+        .toUpperCase()
+        .replaceAll(RegExp(r'\.PERP$', caseSensitive: false), '');
+    final store = autoManagedByCategory[category];
+    if (store == null || store.isAutoManaged(base)) return;
+    store.addBase(base);
+    logger.log(
+      'AUTO LIST: ${bot.pairKey} (${bot.buOrderId}) is a running Auto bot but '
+      'was not on Auto\'s list - added, so the same rules apply to it.',
+    );
+  }
 
   /// Last time a still-failing booked top-up was logged, per bot (once a
   /// minute, not every 5s).
