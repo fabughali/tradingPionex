@@ -1,22 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:go_router/go_router.dart';
 
 import '../../core/core_layout.dart';
 import '../../core/core_spacing.dart';
 import '../../data/control/engine_control_repository.dart';
 import '../../data/models/auto_category.dart';
-import '../../data/models/grid_bot.dart';
-import '../../data/models/preview_grid_pair.dart';
 import '../../data/pionex/pionex_market.dart';
 import '../../data/providers/app_providers.dart';
 import '../../l10n/app_localizations.dart';
-import '../../widgets/category_knob.dart';
-import '../../widgets/reuse_button.dart';
 import '../../widgets/reuse_card.dart';
-import '../../widgets/reuse_chip.dart';
 import '../../widgets/reuse_error.dart';
-import '../../widgets/reuse_data_table.dart';
 import '../../widgets/reuse_loading_indicator.dart';
 import '../../widgets/report_section.dart';
 
