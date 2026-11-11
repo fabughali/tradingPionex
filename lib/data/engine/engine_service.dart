@@ -10,6 +10,7 @@ import '../identity/auto_managed_store.dart';
 import '../identity/bot_category_store.dart';
 import '../identity/created_bots_store.dart';
 import '../identity/entry_signal_store.dart';
+import '../identity/favorite_trades_store.dart';
 import '../identity/pair_category_store.dart';
 import '../identity/pair_investment_store.dart';
 import '../identity/stop_loss_lock_state_store.dart';
@@ -32,6 +33,7 @@ import '../models/preview_grid_pair.dart';
 import '../models/running_bots_report.dart';
 import '../models/range_result.dart';
 import '../pionex/pionex_client.dart';
+import '../pionex/price_momentum.dart';
 import '../risk/risk_gate.dart';
 import 'sll_rules.dart';
 import '../technique/grid_count.dart';
@@ -75,6 +77,7 @@ class EngineService {
     tpSlRatchet = TpSlRatchetStore(storage);
     stopLossLock = StopLossLockStore(storage);
     stopLossLockState = StopLossLockStateStore(storage);
+    favoriteTrades = FavoriteTradesStore(storage);
     entrySignalStore = EntrySignalStore(storage);
     pairCategories = PairCategoryStore(storage);
     pairInvestments = PairInvestmentStore(storage);
@@ -119,6 +122,7 @@ class EngineService {
   /// Per-buOrderId Stop Loss Lock state (the highest profit-floor SL
   /// percentage locked in so far) - see [StopLossLockStateStore].
   late final StopLossLockStateStore stopLossLockState;
+  late final FavoriteTradesStore favoriteTrades;
   late final EntrySignalStore entrySignalStore;
   late final PairCategoryStore pairCategories;
   late final PairInvestmentStore pairInvestments;
@@ -3584,7 +3588,11 @@ class EngineService {
     if (_cdp == null) return;
     final req = storage.readJsonObject(storage.pairActionFile);
     if (req == null) {
-      if (_fillQueue.isNotEmpty) await _fillNextQueued();
+      if (_fillQueue.isNotEmpty) {
+        await _fillNextQueued();
+      } else if (_favoriteDue()) {
+        await _runFavoriteStep();
+      }
       return;
     }
     storage.deleteFileIfExists(storage.pairActionFile);
@@ -3673,6 +3681,226 @@ class EngineService {
       _pairActionRunning = false;
       _resumeWhateverWasPausedForPairAction();
     }
+  }
+
+  /// Favorite trades (2026-11-11, per the user - rules in
+  /// `favorite_trades_store.dart`). Candidates waiting to be checked, one per
+  /// pair-action tick, so the chart is never held for long.
+  final List<({String symbol, bool short})> _favoriteQueue = [];
+  DateTime? _favoriteNoMoneyLoggedAt;
+
+  bool _favoriteDue() =>
+      !_forceStopActive() &&
+      (_favoriteQueue.isNotEmpty || favoriteTrades.isDue(DateTime.now()));
+
+  /// Free for new trades, computed the same way the dashboard shows it:
+  /// Pionex's free USDT minus Waiting bookings minus booked SLL top-ups.
+  Future<double> _freeForNewTradesUsdt() async {
+    final free = (await pionex.getBalance('USDT')).free;
+    var booked = stopLossLockState.totalOwed;
+    final running = <String>{};
+    for (final g in _activeGridsById.values) {
+      if (!g.appInitiated) continue;
+      final cat = botCategories.categoryOf(g.buOrderId) ?? AutoCategory.oneHour;
+      final bare = g.base
+          .toUpperCase()
+          .replaceAll(RegExp(r'\.PERP$', caseSensitive: false), '');
+      running.add('$bare|${cat.wireValue}');
+    }
+    for (final cat in allAutoCategories) {
+      for (final base in autoManagedByCategory[cat]!.loadAutoManagedBases()) {
+        if (running.contains('$base|${cat.wireValue}')) continue;
+        if (retired.isRetiredBase(base, cat)) continue;
+        booked +=
+            _nextInvestmentByPair['${_gridKey(base)}|${cat.wireValue}'] ??
+            pairInvestments.investmentOf('${base}USDT');
+      }
+    }
+    return free - booked;
+  }
+
+  Future<void> _runFavoriteStep() async {
+    if (_favoriteQueue.isEmpty) {
+      await _buildFavoriteQueue(DateTime.now());
+      return;
+    }
+    final c = _favoriteQueue.removeAt(0);
+    _pairActionRunning = true;
+    try {
+      final opened = await _tryFavorite(c.symbol, short: c.short).timeout(
+        const Duration(seconds: 180),
+        onTimeout: () {
+          logger.log(
+            'FAVORITE ${c.symbol}: check did not finish in 180s - skipped, '
+            'forcing a fresh TradingView connection.',
+            level: 'ERROR',
+          );
+          _cdp?.close();
+          _cdp = null;
+          return false;
+        },
+      );
+      if (opened) {
+        favoriteTrades.recordOpened(
+          _baseOf(c.symbol),
+          short: c.short,
+          now: DateTime.now(),
+        );
+        _favoriteQueue.clear();
+        logger.log(
+          'FAVORITE: ${favoriteTrades.openedToday(DateTime.now())}/5 today - '
+          'next check at ${favoriteTrades.nextCheckAt?.toUtc().toIso8601String()} UTC.',
+        );
+      } else if (_favoriteQueue.isEmpty) {
+        favoriteTrades.recordNothing(DateTime.now());
+        logger.log(
+          'FAVORITE: no candidate matched - next check at '
+          '${favoriteTrades.nextCheckAt?.toUtc().toIso8601String()} UTC.',
+        );
+      }
+    } catch (e) {
+      logger.log('FAVORITE ${c.symbol}: error - $e', level: 'ERROR');
+      if (_favoriteQueue.isEmpty) favoriteTrades.recordNothing(DateTime.now());
+    } finally {
+      _pairActionRunning = false;
+      _resumeWhateverWasPausedForPairAction();
+    }
+  }
+
+  Future<void> _buildFavoriteQueue(DateTime now) async {
+    await _refreshActiveGrids();
+    final free = await _freeForNewTradesUsdt();
+    if (free < favoriteInvestmentUsdt) {
+      final last = _favoriteNoMoneyLoggedAt;
+      if (last == null || now.difference(last) > const Duration(hours: 1)) {
+        _favoriteNoMoneyLoggedAt = now;
+        logger.log(
+          'FAVORITE: \$${free.toStringAsFixed(2)} free for new trades - needs '
+          '\$${favoriteInvestmentUsdt.toStringAsFixed(0)}, nothing done.',
+        );
+      }
+      favoriteTrades.recordNothing(now);
+      return;
+    }
+    final momentum = PriceMomentum()
+      ..loadJson(storage.readJsonObject(storage.priceMomentumFile), now);
+    final lastAt = momentum.lastAt;
+    if (lastAt == null ||
+        now.difference(lastAt) > const Duration(minutes: 3) ||
+        momentum.span < const Duration(minutes: 50)) {
+      logger.log(
+        'FAVORITE: the star lists need about an hour of fresh readings '
+        '(have ${momentum.span.inMinutes} min) - trying again next candle.',
+      );
+      favoriteTrades.recordNothing(now);
+      return;
+    }
+    final scores = {
+      for (final e in momentum.readings().entries)
+        e.key: e.value.now - e.value.then,
+    };
+    final exclude = <String>{...favoriteTrades.basesToday(now)};
+    for (final g in _activeGridsById.values) {
+      if (!g.appInitiated) continue;
+      exclude.add(
+        g.base.toUpperCase().replaceAll(RegExp(r'\.PERP$', caseSensitive: false), ''),
+      );
+    }
+    for (final cat in allAutoCategories) {
+      exclude.addAll(autoManagedByCategory[cat]!.loadAutoManagedBases());
+    }
+    final candidates = favoriteCandidates(
+      scores,
+      wantShorts: favoriteTrades.canShort(now),
+      wantLongs: favoriteTrades.canLong(now),
+      exclude: exclude,
+    );
+    if (candidates.isEmpty) {
+      favoriteTrades.recordNothing(now);
+      return;
+    }
+    _favoriteQueue.addAll(candidates);
+    logger.log(
+      'FAVORITE: checking ${candidates.length} pair(s): '
+      '${candidates.map((c) => '${c.symbol}(${c.short ? 'short' : 'long'})').join(', ')}',
+    );
+  }
+
+  /// Opens [symbol] as a favorite trade if its hybrid decision is the right
+  /// OPEN1 (short: HH + Supertrend buy; long: LL + Supertrend sell) and RSI
+  /// at that candle is yellow (short) / blue (long) - green and purple do
+  /// not count here. $10, then marked Last.
+  Future<bool> _tryFavorite(String symbol, {required bool short}) async {
+    const category = AutoCategory.oneHour;
+    final base = _baseOf(symbol);
+    final entryKey = '${_gridKey(base)}|${category.wireValue}';
+    final event = await _confirmedWorm10Event(
+      entryKey,
+      symbol,
+      category,
+      immediate: true,
+    );
+    final want = short ? Worm10EventKind.sellOpen1 : Worm10EventKind.buyOpen1;
+    if (event == null || event.kind != want) {
+      logger.log(
+        'FAVORITE $symbol: no ${short ? 'HH short' : 'LL long'} signal '
+        '(${event == null ? 'none confirmed' : event.kind.name}) - skipped.',
+      );
+      return false;
+    }
+    final check = await _readWorm10Chart(symbol, category.signalResolution);
+    RsiZone? zone;
+    for (final z in check?.rsiZones ?? const <RsiZoneSample>[]) {
+      if (z.time == event.time) zone = z.zone;
+    }
+    final wantZone = short ? RsiZone.yellow : RsiZone.blue;
+    if (zone != wantZone) {
+      logger.log(
+        'FAVORITE $symbol: ${event.kind.name}@${event.time} but RSI was '
+        '${zone?.name ?? 'unknown'} (needs ${wantZone.name}) - skipped.',
+      );
+      return false;
+    }
+    final free = await _freeForNewTradesUsdt();
+    if (free < favoriteInvestmentUsdt) {
+      logger.log(
+        'FAVORITE $symbol: only \$${free.toStringAsFixed(2)} free now - skipped.',
+      );
+      return false;
+    }
+    if (_nextInvestmentByPair.remove(entryKey) != null) {
+      _persistPendingInvestment(base, category, null);
+    }
+    retired.removeRetiredBases([(base: base, category: category)]);
+    autoManagedByCategory[category]!.addBase(base);
+    final hadEntryBefore = _openEntryByPair.containsKey(entryKey);
+    _lastCreateSkipReason = null;
+    await _manageGridPair(
+      GridPairConfig(symbol: symbol, investment: favoriteInvestmentUsdt),
+      event,
+      checkNowTriggered: true,
+      createBlocked: false,
+      category: category,
+      bypassFreshSignalGate: true,
+    );
+    final opened = !hadEntryBefore && _openEntryByPair.containsKey(entryKey);
+    if (!opened) {
+      autoManagedByCategory[category]!.removeBase(base);
+      logger.log(
+        'FAVORITE $symbol: Pionex did not open it'
+        '${_lastCreateSkipReason == null ? '' : ' ($_lastCreateSkipReason)'} - skipped.',
+      );
+      return false;
+    }
+    // Last: once it closes, for any reason, it never reopens.
+    retired.addRetiredBases([(base: base, category: category)]);
+    await _refreshActiveGrids();
+    logger.log(
+      'FAVORITE $symbol: opened ${short ? 'SHORT' : 'LONG'} \$'
+      '${favoriteInvestmentUsdt.toStringAsFixed(0)} on ${event.kind.name}@'
+      '${event.time} (RSI ${zone!.name}) - marked Last.',
+    );
+    return true;
   }
 
   /// Connects to TradingView if needed and re-reads the Red List, writing

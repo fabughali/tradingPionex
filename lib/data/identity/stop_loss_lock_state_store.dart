@@ -50,6 +50,9 @@ class StopLossLockStateStore {
 
   double? owed(String buOrderId) => _owedByBotId[buOrderId];
 
+  /// All booked top-up money, across bots.
+  double get totalOwed => _owedByBotId.values.fold(0.0, (a, b) => a + b);
+
   /// 0 (or less) clears it.
   void setOwed(String buOrderId, double amount) {
     if (amount > 0) {

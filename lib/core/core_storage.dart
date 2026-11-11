@@ -46,6 +46,9 @@ class CoreStorage {
   /// Last hour of Pionex prices for the Next Trade star sort.
   String get priceMomentumFile => p.join(rootDir, 'price-momentum.json');
 
+  /// Today's favorite-trade count and next check time.
+  String get favoriteTradesFile => p.join(rootDir, 'favorite-trades.json');
+
   /// Held (locked) by the one running GUI - see `GuiInstanceLock`.
   String get guiLockFile => p.join(logsDir, 'gui.lock');
 

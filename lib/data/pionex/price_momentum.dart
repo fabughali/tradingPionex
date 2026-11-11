@@ -11,6 +11,9 @@ class PriceMomentum {
 
   bool get isEmpty => _snaps.isEmpty;
 
+  /// When the latest reading was taken, or null if none.
+  DateTime? get lastAt => _snaps.isEmpty ? null : _snaps.last.at;
+
   void add(DateTime at, Map<String, double> prices) {
     if (prices.isEmpty) return;
     _snaps.add((at: at, prices: Map.unmodifiable(prices)));
