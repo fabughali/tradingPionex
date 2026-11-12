@@ -2,83 +2,23 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
-import '../../core/core_layout.dart';
-import '../../core/core_spacing.dart';
 import '../../core/core_theme.dart';
 import '../../data/control/engine_control_repository.dart';
 import '../../data/models/auto_category.dart';
 import '../../data/models/bot_history_entry.dart';
+import '../../data/models/grid_bot.dart';
 import '../../data/providers/app_providers.dart';
-import '../../utilities/util_date.dart';
 import '../../utilities/util_string.dart';
-import '../../widgets/reuse_card.dart';
-import '../../widgets/reuse_chip.dart';
 import '../../widgets/reuse_empty_state.dart';
 import '../../widgets/reuse_error.dart';
 import '../../widgets/reuse_loading_indicator.dart';
 
-/// "Bot type" filter (2026-09-22, per the user: "i want hisory to have
-/// filter for auto trades, manual trades") - a [BotHistoryEntry] has no
-/// explicit `appInitiated` field, so this is derived the same way every
-/// other part of the app infers it: `category != null` means auto (every
-/// auto-entry call site passes one), `category == null` means manual.
-enum _BotTypeFilter { auto, manual }
-
-/// Display name for an `EntrySignalStore` zone key ('yellow'/'green'/
-/// 'white_upper'/'white_lower'/'purple'/'blue' - White split at 50%, per
-/// the user's spec). Null/unrecognized just echoes back whatever string
-/// was stored.
-String _zoneLabel(String? zone) => switch (zone) {
-  'yellow' => 'Yellow',
-  'green' => 'Green',
-  'white_upper' => 'White ≥50',
-  'white_lower' => 'White <50',
-  'purple' => 'Purple',
-  'blue' => 'Blue',
-  _ => zone ?? '—',
-};
-
-/// One "Opened:"/"Closed:" line - `type` alone for a signal recorded since
-/// 2026-09-29 (worm_9_26 is the only source now; no zone/RSI value exists
-/// any more), or the full "type · zone · value" form for an entry recorded
-/// before that, so old history keeps displaying exactly as it always did.
-String _signalLine(
-  String label,
-  String? type,
-  String? zone,
-  double? value,
-  DateTime? at,
-) {
-  final head = zone != null && value != null
-      ? '$type · ${_zoneLabel(zone)} · ${value.toStringAsFixed(1)}'
-      : '$type';
-  final ts = at != null ? ' (${UtilDate.dateTime(at)})' : '';
-  return '$label: $head$ts';
-}
-
-/// The 3 "reason" tags requested alongside bot-type/category (2026-09-22,
-/// per the user: "last/stopped by user/SLL") - independent, multi-select
-/// toggles, since these describe DIFFERENT axes of a history entry (Last is
-/// a [BotHistoryKind], the other two are only ever inferable from
-/// [BotHistoryEntry.detail]'s free text - see [_HistoryScreenState._matchesReasonTag]).
-enum _ReasonTag { last, stoppedByUser, stopLossLock }
-
-/// History of every app-initiated bot that stopped being an active auto bot:
-/// retired via "Last", stopped/closed ("Terminated"), or a human intervened
-/// on it directly so the app stopped tracking it as its own ("Converted to
-/// manual"). Read-only except for delete — a single record or the whole
-/// list at once.
-///
-/// Filters added 2026-09-22, per the user ("i want hisory to have filter
-/// for auto trades, manual trades, 3m/5m/15m/1H/1D/last/stopped by
-/// user/SLL"): 3 independent chip groups - bot type (auto/manual, single-
-/// select), category (3m/5m/15m/1H/1D, single-select - only auto entries
-/// can ever match one), and reason tags (Last/Stopped by user/SLL,
-/// multi-select, since an entry could in principle need more than one).
-/// All 3 groups AND together; no selection in a group means "don't filter
-/// on this axis." Purely a display-layer filter over the same
-/// [botHistoryProvider] data - nothing about the underlying history file
-/// changes.
+/// History, in tradingMT5's layout (2026-11-12, per the user: "check history
+/// card in tradingmt5 and apply same concept"): a totals bar with an
+/// All / Wins / Losses filter, a per-close-reason summary, the "P&L since"
+/// divider line, and a wrapped grid of cards (up to 3 per row) - each card
+/// tinted green / red by realized P&L, with header chips, investment and
+/// P&L, three columns (open / close / trade) and a remarks section.
 class HistoryScreen extends ConsumerStatefulWidget {
   const HistoryScreen({super.key});
 
@@ -86,647 +26,812 @@ class HistoryScreen extends ConsumerStatefulWidget {
   ConsumerState<HistoryScreen> createState() => _HistoryScreenState();
 }
 
+enum _HistoryFilter { all, wins, losses }
+
+/// The close reason, from the structured `stopReason` (or the older free
+/// text in `detail` for entries recorded before that field existed).
+({String label, Color color, String explained}) historyReason(
+  BotHistoryEntry e,
+) {
+  if (e.kind == BotHistoryKind.last) {
+    return (
+      label: 'Last',
+      color: Colors.blueGrey,
+      explained: 'Marked Last - it finished and was not reopened.',
+    );
+  }
+  if (e.kind == BotHistoryKind.convertedToManual) {
+    return (
+      label: 'Converted to manual',
+      color: Colors.orange,
+      explained: 'Handed over to manual - the app stopped managing it.',
+    );
+  }
+  switch (e.stopReason) {
+    case 'take_profit':
+      return (
+        label: 'Take profit',
+        color: Colors.green,
+        explained: "Pionex hit the bot's take-profit.",
+      );
+    case 'stop_loss_lock':
+      return (
+        label: 'SLL',
+        color: Colors.red,
+        explained: 'The SLL stop-loss lock was hit.',
+      );
+    case 'stop_loss_baseline':
+      return (
+        label: 'SL baseline',
+        color: Colors.red,
+        explained: 'The old -50% baseline stop-loss was hit.',
+      );
+    case 'stop_loss_ratchet':
+      return (
+        label: 'SL ratchet',
+        color: Colors.red,
+        explained: 'The old ratchet stop-loss was hit.',
+      );
+    case 'liquidation':
+      return (
+        label: 'Liquidated',
+        color: Colors.deepOrange,
+        explained: 'Pionex liquidated the position.',
+      );
+    case 'terminated_by_user':
+      return (
+        label: 'Closed by user',
+        color: Colors.orange,
+        explained: 'Closed by you (the app or Pionex).',
+      );
+    case 'close_signal':
+      return (
+        label: 'Close signal',
+        color: Colors.blue,
+        explained: 'An opposite hybrid signal closed it.',
+      );
+    case 'never_filled':
+      return (
+        label: 'Never filled',
+        color: Colors.amber,
+        explained: 'No order ever filled - the app cancelled it.',
+      );
+  }
+  final d = e.detail ?? '';
+  if (d.contains('Stop Loss Lock')) {
+    return (label: 'SLL', color: Colors.red, explained: 'The SLL stop-loss lock was hit.');
+  }
+  if (d.contains('Stopped from the app.') ||
+      d.contains('Stopped manually via the gear menu.') ||
+      d.contains('Canceled directly on Pionex/TradingView')) {
+    return (
+      label: 'Closed by user',
+      color: Colors.orange,
+      explained: 'Closed by you (the app or Pionex).',
+    );
+  }
+  if (d.contains('Take-profit triggered')) {
+    return (label: 'Take profit', color: Colors.green, explained: "Pionex hit the bot's take-profit.");
+  }
+  if (d.contains('Position liquidated')) {
+    return (label: 'Liquidated', color: Colors.deepOrange, explained: 'Pionex liquidated the position.');
+  }
+  return (
+    label: e.kind.label,
+    color: Colors.grey,
+    explained: 'Close reason not recorded.',
+  );
+}
+
 class _HistoryScreenState extends ConsumerState<HistoryScreen> {
-  // All 3 groups are multi-select (2026-09-22, per the user: "can you make
-  // multiple selection. currently filter selection can only be applied to
-  // one selection" - the bot-type/category groups were single-select
-  // `ChoiceChip`s, and even the reason-tags group, despite already using
-  // togglable `FilterChip`s, ANDed its selections together internally -
-  // since the 3 reason tags are mutually exclusive per entry in practice,
-  // picking two together always produced zero results, the same usability
-  // problem in different clothes). Semantics now: OR WITHIN a group (any
-  // selected value in that group counts as a match), AND ACROSS groups (an
-  // entry must satisfy every group that has an active selection) - the
-  // standard faceted-filter convention, and the only one where selecting
-  // more chips in one group can only ever show MORE results, never fewer.
-  final Set<_BotTypeFilter> _typeFilters = {};
-  final Set<AutoCategory> _categoryFilters = {};
-  final Set<_ReasonTag> _reasonFilters = {};
+  _HistoryFilter _filter = _HistoryFilter.all;
 
-  /// [BotHistoryEntry] has no structured field for "stopped by the user" or
-  /// "closed via Stop Loss Lock" - both are only ever inferable from
-  /// `detail`'s free text (see the engine's own `_reconciledCloseReason`
-  /// and `EngineControlRepository`'s Stop/gear-menu detail strings, which
-  /// this matches verbatim). "Stopped by user" covers all 3 real ways a
-  /// close is genuinely user-initiated: the app's own Stop button, the
-  /// gear menu's manual-bot Stop, or a cancel done directly on Pionex/
-  /// TradingView outside the app.
-  bool _matchesReasonTag(BotHistoryEntry e, _ReasonTag tag) {
-    final detail = e.detail ?? '';
-    return switch (tag) {
-      _ReasonTag.last => e.kind == BotHistoryKind.last,
-      _ReasonTag.stoppedByUser =>
-        detail.contains('Stopped from the app.') ||
-            detail.contains('Stopped manually via the gear menu.') ||
-            detail.contains('Canceled directly on Pionex/TradingView'),
-      _ReasonTag.stopLossLock => detail.contains('Stop Loss Lock'),
-    };
-  }
-
-  /// Replaces the old single generic "Terminated" chip (2026-09-22, per the
-  /// user: "instead of 'terminated' tag in history card. i want a tag for
-  /// interval... & tag for other things like 'terminated by user', 'last',
-  /// 'SLL', and so on") with the SPECIFIC real reason, reusing the exact
-  /// same `detail` substrings [_matchesReasonTag]/the engine's own
-  /// `_reconciledCloseReason` already produce - every distinct wording that
-  /// function can return gets its own label/tone here, so this can never
-  /// silently drift out of sync with what's actually being written to
-  /// `detail`. Falls back to the bare kind label for anything genuinely
-  /// unmatched (a reason string this screen doesn't know about yet, or one
-  /// of the few kinds - `terminated` with no real reason available - that
-  /// never gets more specific than that).
-  ({String label, ReuseChipTone tone}) _reasonChip(BotHistoryEntry e) {
-    if (e.kind == BotHistoryKind.last) {
-      return (label: 'Last', tone: ReuseChipTone.neutral);
-    }
-    if (e.kind == BotHistoryKind.convertedToManual) {
-      return (label: 'Converted to manual', tone: ReuseChipTone.warning);
-    }
-    // Prefer the structured `stopReason` field (2026-09-26, per the user:
-    // "i want to add stop signal - it can be TP/SL/Terminated by user/
-    // close signal/etc") - reliable by construction, unlike the substring
-    // fallback below, which stays only for entries recorded before this
-    // field existed.
-    switch (e.stopReason) {
-      case 'take_profit':
-        return (label: 'Take Profit', tone: ReuseChipTone.success);
-      case 'stop_loss_baseline':
-        return (label: 'SL Baseline', tone: ReuseChipTone.danger);
-      case 'stop_loss_ratchet':
-        return (label: 'SL Ratchet', tone: ReuseChipTone.danger);
-      case 'stop_loss_lock':
-        return (label: 'SLL', tone: ReuseChipTone.danger);
-      case 'liquidation':
-        return (label: 'Liquidated', tone: ReuseChipTone.danger);
-      case 'terminated_by_user':
-        return (label: 'Terminated by user', tone: ReuseChipTone.warning);
-      case 'close_signal':
-        return (label: 'Close Signal', tone: ReuseChipTone.neutral);
-      case 'never_filled':
-        return (label: 'Never Filled', tone: ReuseChipTone.warning);
-    }
-    final detail = e.detail ?? '';
-    if (detail.contains('Stop Loss Lock')) {
-      return (label: 'SLL', tone: ReuseChipTone.danger);
-    }
-    if (detail.contains('Stopped from the app.') ||
-        detail.contains('Stopped manually via the gear menu.') ||
-        detail.contains('Canceled directly on Pionex/TradingView')) {
-      return (label: 'Terminated by user', tone: ReuseChipTone.warning);
-    }
-    if (detail.contains('ratchet had already locked')) {
-      return (label: 'SL Ratchet', tone: ReuseChipTone.danger);
-    }
-    if (detail.contains('-50% (baseline) triggered')) {
-      return (label: 'SL Baseline', tone: ReuseChipTone.danger);
-    }
-    if (detail.contains('Take-profit triggered')) {
-      return (label: 'Take Profit', tone: ReuseChipTone.success);
-    }
-    if (detail.contains('Position liquidated')) {
-      return (label: 'Liquidated', tone: ReuseChipTone.danger);
-    }
-    return (label: e.kind.label, tone: ReuseChipTone.danger);
-  }
-
-  bool _matches(BotHistoryEntry e) {
-    if (_typeFilters.isNotEmpty) {
-      final type = e.category != null
-          ? _BotTypeFilter.auto
-          : _BotTypeFilter.manual;
-      if (!_typeFilters.contains(type)) return false;
-    }
-    if (_categoryFilters.isNotEmpty &&
-        (e.category == null || !_categoryFilters.contains(e.category))) {
-      return false;
-    }
-    if (_reasonFilters.isNotEmpty &&
-        !_reasonFilters.any((tag) => _matchesReasonTag(e, tag))) {
-      return false;
-    }
-    return true;
-  }
-
-  bool get _hasActiveFilters =>
-      _typeFilters.isNotEmpty ||
-      _categoryFilters.isNotEmpty ||
-      _reasonFilters.isNotEmpty;
-
-  Widget _filterBar(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(
-        CoreSpacing.md,
-        CoreSpacing.sm,
-        CoreSpacing.md,
-        0,
-      ),
-      child: Wrap(
-        spacing: CoreSpacing.xs,
-        runSpacing: CoreSpacing.xs,
-        crossAxisAlignment: WrapCrossAlignment.center,
-        children: [
-          FilterChip(
-            label: const Text('Auto'),
-            selected: _typeFilters.contains(_BotTypeFilter.auto),
-            onSelected: (v) => setState(
-              () => v
-                  ? _typeFilters.add(_BotTypeFilter.auto)
-                  : _typeFilters.remove(_BotTypeFilter.auto),
-            ),
-          ),
-          FilterChip(
-            label: const Text('Manual'),
-            selected: _typeFilters.contains(_BotTypeFilter.manual),
-            onSelected: (v) => setState(
-              () => v
-                  ? _typeFilters.add(_BotTypeFilter.manual)
-                  : _typeFilters.remove(_BotTypeFilter.manual),
-            ),
-          ),
-          const SizedBox(width: CoreSpacing.xs, child: VerticalDivider()),
-          for (final c in allAutoCategories)
-            FilterChip(
-              label: Text(c.label),
-              selected: _categoryFilters.contains(c),
-              onSelected: (v) => setState(
-                () => v ? _categoryFilters.add(c) : _categoryFilters.remove(c),
-              ),
-            ),
-          const SizedBox(width: CoreSpacing.xs, child: VerticalDivider()),
-          FilterChip(
-            label: const Text('Last'),
-            selected: _reasonFilters.contains(_ReasonTag.last),
-            onSelected: (v) => setState(
-              () => v
-                  ? _reasonFilters.add(_ReasonTag.last)
-                  : _reasonFilters.remove(_ReasonTag.last),
-            ),
-          ),
-          FilterChip(
-            label: const Text('Stopped by user'),
-            selected: _reasonFilters.contains(_ReasonTag.stoppedByUser),
-            onSelected: (v) => setState(
-              () => v
-                  ? _reasonFilters.add(_ReasonTag.stoppedByUser)
-                  : _reasonFilters.remove(_ReasonTag.stoppedByUser),
-            ),
-          ),
-          FilterChip(
-            label: const Text('SLL'),
-            selected: _reasonFilters.contains(_ReasonTag.stopLossLock),
-            onSelected: (v) => setState(
-              () => v
-                  ? _reasonFilters.add(_ReasonTag.stopLossLock)
-                  : _reasonFilters.remove(_ReasonTag.stopLossLock),
-            ),
-          ),
-          if (_hasActiveFilters)
-            ActionChip(
-              avatar: const Icon(Icons.close, size: 16),
-              label: const Text('Clear'),
-              onPressed: () => setState(() {
-                _typeFilters.clear();
-                _categoryFilters.clear();
-                _reasonFilters.clear();
-              }),
-            ),
-        ],
-      ),
+  Future<void> _confirmClearAll(EngineControlRepository repo) async {
+    final ok = await _confirm(
+      'Delete all history?',
+      'This permanently deletes every history record. This cannot be undone.',
     );
-  }
-
-  /// Sum shown at the top of the screen (2026-09-22, per the user: "i want
-  /// to have sum at the top of the hisotry screen, this sum will be changed
-  /// according to filter selection") - recomputed from whatever the
-  /// current filter selection leaves visible, so it's always the sum of
-  /// exactly what's on screen. Scoped to the same P&L-reset boundary as the
-  /// official Dashboard sum and this screen's own reset divider (an entry
-  /// before the reset never counted toward "the sum" anywhere else in the
-  /// app, so this shouldn't silently start counting it either) - [entries]
-  /// is null only while history is still loading/erroring, in which case
-  /// nothing is shown yet.
-  Widget _sumBar(
-    BuildContext context,
-    List<BotHistoryEntry>? entries,
-    DateTime? resetSince,
-  ) {
-    if (entries == null) return const SizedBox.shrink();
-    final scoped = resetSince == null
-        ? entries
-        : entries.where((e) => !e.ts.isBefore(resetSince)).toList();
-    final sum = scoped.fold<double>(
-      0,
-      (acc, e) => acc + (e.realizedProfit ?? 0),
-    );
-    final color = sum >= 0
-        ? context.tradingColors.profit
-        : context.tradingColors.loss;
-    final sign = sum < 0 ? '-' : '+';
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(
-        CoreSpacing.md,
-        CoreSpacing.sm,
-        CoreSpacing.md,
-        0,
-      ),
-      child: Row(
-        children: [
-          Text(
-            _hasActiveFilters ? 'Sum (filtered):' : 'Sum:',
-            style: Theme.of(context).textTheme.labelLarge,
-          ),
-          const SizedBox(width: CoreSpacing.xs),
-          Text(
-            '$sign${UtilString.usd(sum.abs())}',
-            style: Theme.of(context).textTheme.titleMedium?.copyWith(
-              color: color,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-          const SizedBox(width: CoreSpacing.xs),
-          Text(
-            '(${scoped.length} entr${scoped.length == 1 ? 'y' : 'ies'})',
-            style: Theme.of(context).textTheme.bodySmall,
-          ),
-        ],
-      ),
-    );
-  }
-
-  Future<void> _confirmClearAll(
-    BuildContext context,
-    WidgetRef ref,
-    EngineControlRepository repo,
-  ) async {
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Delete all history'),
-        content: const Text(
-          'Permanently delete every history record? This cannot be undone.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Delete all'),
-          ),
-        ],
-      ),
-    );
-    if (ok == true) {
+    if (ok) {
       repo.clearHistory();
       ref.invalidate(botHistoryProvider);
     }
   }
 
-  /// Card background tint by P&L (2026-09-19, per the user: "the card in
-  /// history should have 3 colors. yellow for 0.00 P&L, green for positive
-  /// P&L, red for negative P&L") - null (no realizedProfit at all, e.g. a
-  /// "Last" entry, which never gets one) keeps the theme's normal card
-  /// color rather than forcing one of the three.
-  Color? _cardColor(BuildContext context, double? pnl) {
-    if (pnl == null) return null;
-    final trading = context.tradingColors;
-    if (pnl > 0) return trading.profitContainer;
-    if (pnl < 0) return trading.lossContainer;
-    return Colors.amber.withValues(alpha: 0.18);
+  Future<void> _confirmDeleteOne(
+    EngineControlRepository repo,
+    BotHistoryEntry e,
+  ) async {
+    final ok = await _confirm(
+      'Delete this record?',
+      '${e.pairKey}${e.buOrderId == null ? '' : ' (${e.buOrderId})'} will be '
+          'permanently removed from history.',
+    );
+    if (ok) {
+      repo.deleteHistoryEntry(e.id);
+      ref.invalidate(botHistoryProvider);
+    }
+  }
+
+  Future<bool> _confirm(String title, String body) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(title),
+        content: Text(body),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(context).colorScheme.error,
+            ),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    return confirmed == true;
   }
 
   @override
   Widget build(BuildContext context) {
     final repo = ref.watch(controlRepositoryProvider);
     final historyAsync = ref.watch(botHistoryProvider);
-    // Same summary the Auto bots card itself uses - reused here so the
-    // divider's position AND the net figure it shows can never drift out of
-    // sync with what's actually counted.
+    final scheme = Theme.of(context).colorScheme;
     final pnl = repo.pnlSummary();
-    final resetSince = pnl.since;
-    final netColor = pnl.net >= 0
-        ? context.tradingColors.profit
-        : context.tradingColors.loss;
-    final netSign = pnl.net < 0 ? '-' : '+';
-    // Filtered independently of the `.when()` builder below (2026-09-22, per
-    // the user) so the top-of-screen sum stays visible/correct even while
-    // that builder is mid-rebuild for an unrelated reason - `.value` (this
-    // riverpod version's nullable data getter) is null only during the
-    // genuine initial load/error state, which `_sumBar` itself handles.
-    final filteredEntries = historyAsync.value?.where(_matches).toList();
+    final favorites = repo.favoriteBotIds();
 
     return Scaffold(
       appBar: AppBar(
         title: const Text('History'),
         actions: [
           IconButton(
-            icon: const Icon(Icons.delete_sweep_outlined),
+            icon: const Icon(Icons.delete_outline),
             tooltip: 'Delete all history',
-            onPressed: () => _confirmClearAll(context, ref, repo),
+            onPressed: () => _confirmClearAll(repo),
           ),
         ],
       ),
-      body: Column(
-        children: [
-          _sumBar(context, filteredEntries, resetSince),
-          _filterBar(context),
-          Expanded(
-            child: historyAsync.when(
-              loading: () => const ReuseLoadingIndicator(),
-              error: (err, st) => ReuseError(message: '$err'),
-              data: (allEntries) {
-                final entries = allEntries.where(_matches).toList();
-                return LayoutBuilder(
+      body: historyAsync.when(
+        loading: () => const ReuseLoadingIndicator(),
+        error: (err, st) => ReuseError(message: '$err'),
+        data: (entries) {
+          if (entries.isEmpty) {
+            return const Center(
+              child: ReuseEmptyState(
+                message:
+                    'No history yet - a bot shows up here once it closes, '
+                    'is retired, or is converted to manual.',
+                icon: Icons.history,
+              ),
+            );
+          }
+          final shown = entries
+              .where(
+                (e) => switch (_filter) {
+                  _HistoryFilter.all => true,
+                  _HistoryFilter.wins => (e.realizedProfit ?? 0) > 0,
+                  _HistoryFilter.losses => (e.realizedProfit ?? 0) < 0,
+                },
+              )
+              .toList();
+          final since = pnl.since;
+          // Newest first: the "P&L since" line sits before the first entry
+          // older than the marker (or at the end if none is older).
+          final markerIndex = since == null
+              ? -1
+              : () {
+                  final i = shown.indexWhere((e) => e.ts.isBefore(since));
+                  return i == -1 ? shown.length : i;
+                }();
+          return Column(
+            children: [
+              _TotalsBar(
+                entries: entries,
+                filter: _filter,
+                onFilter: (f) => setState(() => _filter = f),
+              ),
+              _ReasonSummaryBar(entries: entries),
+              const Divider(height: 1),
+              Expanded(
+                child: LayoutBuilder(
                   builder: (context, constraints) {
-                    if (allEntries.isEmpty) {
-                      return const Center(
-                        child: ReuseEmptyState(
-                          message:
-                              'No history yet — a bot shows up here once it\'s '
-                              'retired, stopped, or converted to manual.',
-                          icon: Icons.history,
-                        ),
-                      );
+                    const gap = 10.0;
+                    final usable = constraints.maxWidth - 24;
+                    final cols = (usable / 360).floor().clamp(1, 3);
+                    final cardWidth = (usable - gap * (cols - 1)) / cols;
+                    final rows = <Object>[];
+                    var group = <BotHistoryEntry>[];
+                    void flush() {
+                      for (var i = 0; i < group.length; i += cols) {
+                        rows.add(
+                          group.sublist(i, (i + cols).clamp(0, group.length)),
+                        );
+                      }
+                      group = [];
                     }
-                    if (entries.isEmpty) {
+
+                    for (var i = 0; i < shown.length; i++) {
+                      if (i == markerIndex) {
+                        flush();
+                        rows.add('marker');
+                      }
+                      group.add(shown[i]);
+                    }
+                    flush();
+                    if (markerIndex == shown.length && markerIndex >= 0) {
+                      rows.add('marker');
+                    }
+                    if (shown.isEmpty) {
                       return const Center(
                         child: ReuseEmptyState(
-                          message: 'No history matches the selected filters.',
+                          message: 'Nothing matches this filter.',
                           icon: Icons.filter_alt_off_outlined,
                         ),
                       );
                     }
-                    // Index of the divider (2026-09-19, per the user: "there
-                    // should be a single dot in right side scroll to show the
-                    // location of this line in the scroll bar") - drives the dot's
-                    // vertical position as a fraction of the list, an
-                    // approximation (list items vary slightly in height) rather
-                    // than an exact scroll-offset match, which is good enough for
-                    // "roughly where the reset is" at a glance.
-                    int? dividerIndex;
-                    if (resetSince != null) {
-                      for (var i = 0; i < entries.length; i++) {
-                        if (entries[i].ts.isBefore(resetSince)) {
-                          dividerIndex = i;
-                          break;
+                    return ListView.builder(
+                      padding: const EdgeInsets.all(12),
+                      itemCount: rows.length,
+                      itemBuilder: (context, i) {
+                        final row = rows[i];
+                        if (row is! List<BotHistoryEntry>) {
+                          return _PnlDividerLine(since: since!, net: pnl.net);
                         }
-                      }
-                    }
-                    return Stack(
-                      children: [
-                        ListView(
-                          padding: CoreLayout.edgeMargin(constraints),
-                          children: [
-                            for (final (index, e) in entries.indexed) ...[
-                              // Reset divider (2026-09-19, per the user: "add a
-                              // horizontal line... everything below this line is
-                              // not included in sum, everything above is
-                              // included") - entries are newest-first, so this
-                              // lands right before the first entry whose `ts` falls
-                              // before the reset boundary, i.e. exactly where
-                              // repo.pnlSummary() itself stops counting.
-                              if (resetSince != null &&
-                                  e.ts.isBefore(resetSince) &&
-                                  (index == 0 ||
-                                      !entries[index - 1].ts.isBefore(
-                                        resetSince,
-                                      )))
-                                Padding(
-                                  padding: const EdgeInsets.symmetric(
-                                    vertical: CoreSpacing.sm,
-                                  ),
-                                  child: Row(
-                                    children: [
-                                      Expanded(
-                                        child: Divider(
-                                          thickness: 4,
-                                          color: netColor,
-                                        ),
-                                      ),
-                                      Padding(
-                                        padding: const EdgeInsets.symmetric(
-                                          horizontal: CoreSpacing.sm,
-                                        ),
-                                        child: Text(
-                                          '$netSign${UtilString.usd(pnl.net.abs())}',
-                                          style: Theme.of(context)
-                                              .textTheme
-                                              .labelSmall
-                                              ?.copyWith(
-                                                color: netColor,
-                                                fontWeight: FontWeight.bold,
-                                              ),
-                                        ),
-                                      ),
-                                      Expanded(
-                                        child: Divider(
-                                          thickness: 4,
-                                          color: netColor,
-                                        ),
-                                      ),
-                                    ],
+                        return Padding(
+                          padding: const EdgeInsets.only(bottom: gap),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              for (var c = 0; c < row.length; c++) ...[
+                                if (c > 0) const SizedBox(width: gap),
+                                SizedBox(
+                                  width: cardWidth,
+                                  child: _HistoryCard(
+                                    entry: row[c],
+                                    scheme: scheme,
+                                    favorite: row[c].buOrderId != null &&
+                                        favorites.contains(row[c].buOrderId),
+                                    onDetails: () => context.push(
+                                      '/history-details',
+                                      extra: row[c],
+                                    ),
+                                    onDelete: () =>
+                                        _confirmDeleteOne(repo, row[c]),
                                   ),
                                 ),
-                              ReuseCard(
-                                color: _cardColor(context, e.realizedProfit),
-                                child: InkWell(
-                                  onTap: () => context.push(
-                                    '/history-details',
-                                    extra: e,
-                                  ),
-                                  child: Row(
-                                    children: [
-                                      Expanded(
-                                        child: Column(
-                                          crossAxisAlignment:
-                                              CrossAxisAlignment.start,
-                                          children: [
-                                            Row(
-                                              children: [
-                                                Text(
-                                                  e.pairKey,
-                                                  style: Theme.of(
-                                                    context,
-                                                  ).textTheme.titleMedium,
-                                                ),
-                                                const SizedBox(
-                                                  width: CoreSpacing.sm,
-                                                ),
-                                                // Interval tag + reason tag
-                                                // (2026-09-22, per the user:
-                                                // "instead of 'terminated'
-                                                // tag... i want a tag for
-                                                // interval... & tag for
-                                                // other things like
-                                                // 'terminated by user',
-                                                // 'last', 'SLL'") - replaces
-                                                // the old single generic
-                                                // kind-based chip. The
-                                                // interval only ever shows
-                                                // for an auto entry (manual
-                                                // entries have no category).
-                                                if (e.category != null) ...[
-                                                  ReuseChip(
-                                                    label: e.category!.label,
-                                                    tone: ReuseChipTone.neutral,
-                                                  ),
-                                                  const SizedBox(width: 4),
-                                                ],
-                                                ReuseChip(
-                                                  label: _reasonChip(e).label,
-                                                  tone: _reasonChip(e).tone,
-                                                ),
-                                                // P&L value (2026-09-19, per the
-                                                // user: "the card in history...
-                                                // and in the card it should be
-                                                // mentioned the value, not in
-                                                // details screen") - previously
-                                                // only shown on the details screen.
-                                                if (e.realizedProfit !=
-                                                    null) ...[
-                                                  const Spacer(),
-                                                  Text(
-                                                    '${e.realizedProfit! >= 0 ? '+' : ''}${UtilString.usd(e.realizedProfit!)}',
-                                                    style: Theme.of(context)
-                                                        .textTheme
-                                                        .titleMedium
-                                                        ?.copyWith(
-                                                          fontWeight:
-                                                              FontWeight.bold,
-                                                          color:
-                                                              e.realizedProfit! >
-                                                                  0
-                                                              ? context
-                                                                    .tradingColors
-                                                                    .profit
-                                                              : e.realizedProfit! <
-                                                                    0
-                                                              ? context
-                                                                    .tradingColors
-                                                                    .loss
-                                                              : Colors
-                                                                    .amber
-                                                                    .shade800,
-                                                        ),
-                                                  ),
-                                                ],
-                                              ],
-                                            ),
-                                            const SizedBox(height: 2),
-                                            Text(
-                                              UtilDate.dateTime(e.ts),
-                                              style: Theme.of(
-                                                context,
-                                              ).textTheme.bodySmall,
-                                            ),
-                                            if (e.buOrderId != null) ...[
-                                              const SizedBox(height: 2),
-                                              // Selectable (2026-09-22, per
-                                              // the user: "i want bot id to
-                                              // be selectable") - a plain
-                                              // Text can't be highlighted/
-                                              // copied; SelectableText's own
-                                              // drag-select gesture takes
-                                              // priority over the row's
-                                              // InkWell tap when the user is
-                                              // actually dragging across
-                                              // this text, so selecting the
-                                              // ID no longer also opens the
-                                              // details screen.
-                                              SelectableText(
-                                                'Bot ID: ${e.buOrderId}',
-                                                style: Theme.of(
-                                                  context,
-                                                ).textTheme.bodySmall,
-                                              ),
-                                            ],
-                                            if (e.detail != null) ...[
-                                              const SizedBox(height: 2),
-                                              Text(
-                                                e.detail!,
-                                                style: Theme.of(
-                                                  context,
-                                                ).textTheme.bodySmall,
-                                              ),
-                                            ],
-                                            // The entry-signal record
-                                            // (2026-09-26, per the user:
-                                            // "the record should be one out
-                                            // of those 60 entries") -
-                                            // permanently carried into
-                                            // History at close time (see
-                                            // `BotHistoryEntry
-                                            // .openSignalType` etc), so it
-                                            // survives even after the live
-                                            // `EntrySignalStore` record for
-                                            // this buOrderId is forgotten.
-                                            if (e.openSignalType != null) ...[
-                                              const SizedBox(height: 2),
-                                              Text(
-                                                // Timestamped per the user
-                                                // (2026-09-26: "you have to
-                                                // include date and time for
-                                                // open/close in history..
-                                                // so each singla is time
-                                                // stamped too") - using
-                                                // TradingView's own bar
-                                                // time (openSignalAt/
-                                                // closeSignalAt), not
-                                                // ts/startTime/endTime
-                                                // (when the app itself
-                                                // recorded/acted on it).
-                                                e.closeSignalType != null
-                                                    ? '${_signalLine('Opened', e.openSignalType, e.openSignalZone, e.openSignalValue, e.openSignalAt)}\n'
-                                                          '${_signalLine('Closed', e.closeSignalType, e.closeSignalZone, e.closeSignalValue, e.closeSignalAt)}'
-                                                    : _signalLine('Opened', e.openSignalType, e.openSignalZone, e.openSignalValue, e.openSignalAt),
-                                                style: Theme.of(context)
-                                                    .textTheme
-                                                    .bodySmall
-                                                    ?.copyWith(
-                                                      fontStyle:
-                                                          FontStyle.italic,
-                                                    ),
-                                              ),
-                                            ],
-                                          ],
-                                        ),
-                                      ),
-                                      IconButton(
-                                        icon: const Icon(Icons.delete_outline),
-                                        tooltip: 'Delete this record',
-                                        onPressed: () {
-                                          repo.deleteHistoryEntry(e.id);
-                                          ref.invalidate(botHistoryProvider);
-                                        },
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ),
+                              ],
                             ],
-                          ],
+                          ),
+                        );
+                      },
+                    );
+                  },
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+/// "42 closed · win 26 · loss 16 · net +18.40" plus All / Wins / Losses.
+class _TotalsBar extends StatelessWidget {
+  const _TotalsBar({
+    required this.entries,
+    required this.filter,
+    required this.onFilter,
+  });
+
+  final List<BotHistoryEntry> entries;
+  final _HistoryFilter filter;
+  final ValueChanged<_HistoryFilter> onFilter;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final trading = context.tradingColors;
+    final wins = entries.where((e) => (e.realizedProfit ?? 0) > 0).length;
+    final losses = entries.where((e) => (e.realizedProfit ?? 0) < 0).length;
+    final net = entries.fold<double>(0, (s, e) => s + (e.realizedProfit ?? 0));
+    final netColor = net > 0
+        ? trading.profit
+        : net < 0
+        ? trading.loss
+        : scheme.onSurfaceVariant;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text.rich(
+              TextSpan(
+                style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
+                children: [
+                  TextSpan(
+                    text:
+                        '${entries.length} records  ·  win $wins  ·  loss $losses  ·  net ',
+                  ),
+                  TextSpan(
+                    text: '${net >= 0 ? '+' : ''}${net.toStringAsFixed(2)}',
+                    style: TextStyle(
+                      color: netColor,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          SegmentedButton<_HistoryFilter>(
+            showSelectedIcon: false,
+            style: const ButtonStyle(visualDensity: VisualDensity.compact),
+            segments: const [
+              ButtonSegment(value: _HistoryFilter.all, label: Text('All')),
+              ButtonSegment(value: _HistoryFilter.wins, label: Text('Wins')),
+              ButtonSegment(
+                value: _HistoryFilter.losses,
+                label: Text('Losses'),
+              ),
+            ],
+            selected: {filter},
+            onSelectionChanged: (s) => onFilter(s.first),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// "Close signal (13): -12.40   SLL (4): +60.00 ..." - every record grouped
+/// by close reason, with its count and total realized P&L.
+class _ReasonSummaryBar extends StatelessWidget {
+  const _ReasonSummaryBar({required this.entries});
+
+  final List<BotHistoryEntry> entries;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final trading = context.tradingColors;
+    final counts = <String, int>{};
+    final sums = <String, double>{};
+    for (final e in entries) {
+      final label = historyReason(e).label;
+      counts[label] = (counts[label] ?? 0) + 1;
+      sums[label] = (sums[label] ?? 0) + (e.realizedProfit ?? 0);
+    }
+    if (counts.isEmpty) return const SizedBox.shrink();
+    final labels = counts.keys.toList()
+      ..sort((a, b) => counts[b]!.compareTo(counts[a]!));
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      child: Wrap(
+        spacing: 16,
+        runSpacing: 4,
+        children: [
+          for (final label in labels)
+            Text.rich(
+              TextSpan(
+                style: Theme.of(
+                  context,
+                ).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
+                children: [
+                  TextSpan(text: '$label (${counts[label]}): '),
+                  TextSpan(
+                    text:
+                        '${sums[label]! >= 0 ? '+' : ''}${sums[label]!.toStringAsFixed(2)}',
+                    style: TextStyle(
+                      fontWeight: FontWeight.w700,
+                      color: sums[label]! < 0
+                          ? trading.loss
+                          : sums[label]! > 0
+                          ? trading.profit
+                          : scheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// "P&L since <time>: +12.40" across the list, where the Dashboard's P&L
+/// summary starts counting.
+class _PnlDividerLine extends StatelessWidget {
+  const _PnlDividerLine({required this.since, required this.net});
+
+  final DateTime since;
+  final double net;
+
+  @override
+  Widget build(BuildContext context) {
+    final trading = context.tradingColors;
+    final color = net < 0
+        ? trading.loss
+        : net > 0
+        ? trading.profit
+        : Colors.amber;
+    final l = since.toLocal();
+    String two(int n) => n.toString().padLeft(2, '0');
+    final when =
+        '${l.year}-${two(l.month)}-${two(l.day)} ${two(l.hour)}:${two(l.minute)}';
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 10),
+      child: Row(
+        children: [
+          Expanded(
+            child: Divider(color: color.withValues(alpha: 0.6), thickness: 1.5),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10),
+            child: Text(
+              'P&L since $when: ${net >= 0 ? '+' : ''}${net.toStringAsFixed(2)}',
+              style: TextStyle(
+                color: color,
+                fontWeight: FontWeight.w700,
+                fontSize: 12,
+              ),
+            ),
+          ),
+          Expanded(
+            child: Divider(color: color.withValues(alpha: 0.6), thickness: 1.5),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _HistoryCard extends StatelessWidget {
+  const _HistoryCard({
+    required this.entry,
+    required this.scheme,
+    required this.favorite,
+    required this.onDetails,
+    required this.onDelete,
+  });
+
+  final BotHistoryEntry entry;
+  final ColorScheme scheme;
+  final bool favorite;
+  final VoidCallback onDetails;
+  final VoidCallback onDelete;
+
+  static String _short(DateTime? dt) {
+    if (dt == null) return '—';
+    final l = dt.toLocal();
+    String two(int n) => n.toString().padLeft(2, '0');
+    return '${two(l.month)}-${two(l.day)} ${two(l.hour)}:${two(l.minute)}';
+  }
+
+  static String _duration(DateTime? start, DateTime? end) {
+    if (start == null || end == null) return '—';
+    final d = end.difference(start);
+    if (d.inDays > 0) return '${d.inDays}d ${d.inHours % 24}h';
+    if (d.inHours > 0) return '${d.inHours}h ${d.inMinutes % 60}m';
+    if (d.inMinutes > 0) return '${d.inMinutes}m ${d.inSeconds % 60}s';
+    return '${d.inSeconds}s';
+  }
+
+  /// Hybrid decision labels, same as the Auto cards.
+  static String _signal(String? type, DateTime? at) {
+    if (type == null) return '—';
+    final label = switch (type) {
+      'buyOpen1' => 'LL',
+      'sellOpen1' => 'HH',
+      'zigzagBuy' => 'Buy',
+      'zigzagSell' => 'Sell',
+      _ => type,
+    };
+    return '$label ${_short(at)}'.trim();
+  }
+
+  static String _price(double? v) =>
+      (v == null || v == 0) ? '—' : UtilString.price(v);
+
+  Widget _label(String text) => Text(
+    text,
+    style: TextStyle(
+      fontSize: 11,
+      fontWeight: FontWeight.w700,
+      color: scheme.onSurfaceVariant,
+    ),
+  );
+
+  Widget _value(String text, {Color? color}) => Text(
+    text,
+    maxLines: 1,
+    overflow: TextOverflow.ellipsis,
+    style: TextStyle(fontSize: 12, color: color),
+  );
+
+  Widget _cell(String label, String value) => Padding(
+    padding: const EdgeInsets.only(bottom: 6),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [_label(label), const SizedBox(height: 1), _value(value)],
+    ),
+  );
+
+  Widget _badge(String text, Color color) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+    decoration: BoxDecoration(
+      color: color.withValues(alpha: 0.15),
+      borderRadius: BorderRadius.circular(5),
+    ),
+    child: Text(
+      text,
+      style: TextStyle(fontSize: 11, color: color, fontWeight: FontWeight.w600),
+    ),
+  );
+
+  @override
+  Widget build(BuildContext context) {
+    final trading = context.tradingColors;
+    final profit = entry.realizedProfit;
+    final tint = profit == null || profit == 0
+        ? null
+        : (profit > 0 ? trading.profit : trading.loss);
+    final reason = historyReason(entry);
+    final isLong = entry.direction == GridDirection.long;
+    final pct = entry.profitPercent;
+
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+      decoration: BoxDecoration(
+        color: tint?.withValues(alpha: 0.08) ?? scheme.surfaceContainerLow,
+        border: Border.all(
+          color: tint?.withValues(alpha: 0.7) ?? scheme.outlineVariant,
+          width: tint == null ? 1 : 1.4,
+        ),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Wrap(
+                  spacing: 4,
+                  runSpacing: 4,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.only(right: 4),
+                      child: Text(
+                        entry.pairKey,
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w700,
+                          fontSize: 14,
                         ),
-                        if (dividerIndex != null)
-                          Positioned(
-                            right: 2,
-                            top:
-                                (dividerIndex / entries.length) *
-                                constraints.maxHeight,
-                            child: Container(
-                              width: 8,
-                              height: 8,
-                              decoration: const BoxDecoration(
-                                color: Colors.amber,
-                                shape: BoxShape.circle,
+                      ),
+                    ),
+                    if (favorite)
+                      const Tooltip(
+                        message: 'Favorite trade',
+                        child: Icon(Icons.star, size: 16, color: Colors.amber),
+                      ),
+                    if (entry.direction != null)
+                      _badge(
+                        isLong ? 'LONG' : 'SHORT',
+                        isLong ? trading.profit : trading.loss,
+                      ),
+                    if (entry.leverage != null)
+                      _badge(
+                        '${entry.leverage!.toStringAsFixed(0)}x',
+                        scheme.outline,
+                      ),
+                    _badge(reason.label, reason.color),
+                  ],
+                ),
+              ),
+              PopupMenuButton<String>(
+                tooltip: 'More',
+                onSelected: (v) => v == 'details' ? onDetails() : onDelete(),
+                itemBuilder: (context) => const [
+                  PopupMenuItem(
+                    value: 'details',
+                    child: Row(
+                      children: [
+                        Icon(Icons.info_outline, size: 20),
+                        SizedBox(width: 10),
+                        Text('Details'),
+                      ],
+                    ),
+                  ),
+                  PopupMenuItem(
+                    value: 'delete',
+                    child: Row(
+                      children: [
+                        Icon(Icons.delete_outline, size: 20, color: Colors.red),
+                        SizedBox(width: 10),
+                        Text(
+                          'Delete record',
+                          style: TextStyle(color: Colors.red),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+                child: Icon(
+                  Icons.more_vert,
+                  size: 20,
+                  color: scheme.onSurfaceVariant,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 2),
+          Wrap(
+            children: [
+              if (entry.buOrderId != null)
+                SelectableText(
+                  '#${entry.buOrderId}',
+                  style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
+                ),
+              Text(
+                '  ·  ${entry.category?.label ?? 'Manual'}  ·  '
+                '${_duration(entry.startTime, entry.endTime ?? entry.ts)}',
+                style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Container(
+            decoration: BoxDecoration(
+              border: Border.all(color: scheme.outlineVariant),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            clipBehavior: Clip.antiAlias,
+            child: IntrinsicHeight(
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Expanded(
+                    child: Padding(
+                      padding: const EdgeInsets.all(8),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          _label('Investment'),
+                          _value(
+                            entry.initialInvestment == null
+                                ? '—'
+                                : UtilString.usd(entry.initialInvestment!),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  Expanded(
+                    child: Container(
+                      padding: const EdgeInsets.all(8),
+                      color: (tint ?? scheme.outline).withValues(alpha: 0.12),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.end,
+                        children: [
+                          _label('Realized P&L'),
+                          FittedBox(
+                            fit: BoxFit.scaleDown,
+                            child: Text(
+                              profit == null
+                                  ? '—'
+                                  : '${profit >= 0 ? '+' : ''}${profit.toStringAsFixed(2)}'
+                                        '${pct == null ? '' : ' (${pct >= 0 ? '+' : ''}${pct.toStringAsFixed(2)}%)'}',
+                              style: TextStyle(
+                                fontSize: 15,
+                                fontWeight: FontWeight.w700,
+                                color: tint ?? scheme.onSurface,
                               ),
                             ),
                           ),
-                      ],
-                    );
-                  },
-                );
-              },
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 10),
+          IntrinsicHeight(
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _cell('Opened', _short(entry.startTime)),
+                      _cell('Entry', _price(entry.entryPrice)),
+                      _cell(
+                        'Open signal',
+                        _signal(entry.openSignalType, entry.openSignalAt),
+                      ),
+                    ],
+                  ),
+                ),
+                VerticalDivider(width: 14, color: scheme.outlineVariant),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _cell('Closed', _short(entry.endTime ?? entry.ts)),
+                      _cell('Close price', _price(entry.exitPrice)),
+                      _cell(
+                        'Close signal',
+                        _signal(entry.closeSignalType, entry.closeSignalAt),
+                      ),
+                    ],
+                  ),
+                ),
+                VerticalDivider(width: 14, color: scheme.outlineVariant),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _cell(
+                        'Range',
+                        (entry.bottom == null || entry.top == null)
+                            ? '—'
+                            : '${_price(entry.bottom)}–${_price(entry.top)}',
+                      ),
+                      _cell('Grids', entry.gridCount?.toString() ?? '—'),
+                      _cell(
+                        'Extra margin',
+                        entry.extraMargin == null
+                            ? '—'
+                            : UtilString.usd(entry.extraMargin!),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Container(
+            width: double.infinity,
+            margin: const EdgeInsets.only(top: 4),
+            padding: const EdgeInsets.fromLTRB(8, 6, 8, 6),
+            decoration: BoxDecoration(
+              color: scheme.surfaceContainerHighest.withValues(alpha: 0.5),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _label('Remarks'),
+                const SizedBox(height: 2),
+                Text(reason.explained, style: const TextStyle(fontSize: 12)),
+                if (entry.detail != null) ...[
+                  const SizedBox(height: 2),
+                  Text(
+                    entry.detail!,
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: scheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+                if (entry.liquidationPrice != null &&
+                    entry.liquidationPrice != 0) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    'Liquidation: ${_price(entry.liquidationPrice)}',
+                    style: const TextStyle(fontSize: 11),
+                  ),
+                ],
+              ],
             ),
           ),
         ],
