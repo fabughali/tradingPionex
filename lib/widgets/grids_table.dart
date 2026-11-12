@@ -8,6 +8,8 @@ import '../data/models/auto_category.dart';
 import '../data/models/grid_bot.dart';
 import '../utilities/util_string.dart';
 import 'bot_actions_menu.dart';
+import 'bot_add_investment_sheet.dart';
+import 'bot_margin_sheet.dart';
 import 'reuse_button.dart';
 import 'reuse_chip.dart';
 import 'reuse_data_table.dart';
@@ -364,7 +366,7 @@ class _GridsTableState extends State<GridsTable> {
             ),
           )
         else ...[
-          if (_hasBulkActions) ...[
+          if (_hasBulkActions && !widget.asCards) ...[
             Wrap(
               spacing: CoreSpacing.sm,
               runSpacing: CoreSpacing.sm,
@@ -778,76 +780,52 @@ class _GridsTableState extends State<GridsTable> {
     final pnlColor = profit == null
         ? null
         : (profit >= 0 ? trading.profit : trading.loss);
-    final selected = _selected.contains(g.buOrderId);
-    final pending = _pendingAction.contains(g.buOrderId);
-
+    // tradingMT5's running card (per the user, 2026-11-12): tinted by P&L;
+    // header = star, pair and badges on the left (wrapping, never cut), the
+    // hourly check mark, a gap and the more menu on the right.
+    final tint = (profit == null || profit == 0)
+        ? null
+        : (profit > 0 ? trading.profit : trading.loss);
+    final lastOn = _isLastMarked(bareBase, category);
     return Container(
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 8),
       decoration: BoxDecoration(
-        color: scheme.surfaceContainerLow,
+        color: tint?.withValues(alpha: 0.08) ?? scheme.surfaceContainerLow,
         borderRadius: BorderRadius.circular(12),
         border: Border.all(
-          color: selected ? scheme.primary : scheme.outlineVariant,
-          width: selected ? 1.5 : 1,
+          color: tint?.withValues(alpha: 0.7) ?? scheme.outlineVariant,
+          width: tint == null ? 1 : 1.4,
         ),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Per the user (2026-11-12): from the left - the "more" dots, the
-          // selection checkbox, a gap, then the pair and its chips. Chips
-          // wrap to a new line rather than cutting text with "...".
           Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              BotMoreMenuButton(bot: g),
-              if (_hasBulkActions)
-                SizedBox(
-                  width: 28,
-                  height: 28,
-                  child: Checkbox(
-                    value: selected,
-                    onChanged: pending
-                        ? null
-                        : (v) => setState(
-                            () => v == true
-                                ? _selected.add(g.buOrderId)
-                                : _selected.remove(g.buOrderId),
-                          ),
-                  ),
-                ),
-              const SizedBox(width: 10),
               Expanded(
                 child: Wrap(
-                  spacing: 6,
+                  spacing: 4,
                   runSpacing: 4,
                   crossAxisAlignment: WrapCrossAlignment.center,
                   children: [
-                    InkWell(
-                      onTap: () => context.push('/bot-details', extra: g),
-                      child: Text(
-                        g.pairKey,
-                        style: theme.textTheme.titleMedium?.copyWith(
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ),
-                    if (widget.cycleMarkerFor?.call(g) case final mark?)
-                      Tooltip(
-                        message: 'Checked this hour',
-                        child: Text(
-                          mark,
-                          style: TextStyle(
-                            color: trading.profit,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                      ),
                     if (widget.favoriteIds.contains(g.buOrderId))
                       const Tooltip(
                         message: 'Favorite trade',
                         child: Icon(Icons.star, size: 16, color: Colors.amber),
                       ),
+                    Padding(
+                      padding: const EdgeInsets.only(right: 4),
+                      child: InkWell(
+                        onTap: () => context.push('/bot-details', extra: g),
+                        child: Text(
+                          g.pairKey,
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w700,
+                            fontSize: 15,
+                          ),
+                        ),
+                      ),
+                    ),
                     if (g.trend != null)
                       badge(
                         long ? 'LONG' : 'SHORT',
@@ -860,53 +838,41 @@ class _GridsTableState extends State<GridsTable> {
                         scheme.outline.withValues(alpha: 0.15),
                         scheme.outline,
                       ),
+                    if (lastOn)
+                      badge(
+                        'LAST',
+                        Colors.deepOrange.withValues(alpha: 0.15),
+                        Colors.deepOrange,
+                      ),
                   ],
                 ),
               ),
+              if (widget.cycleMarkerFor?.call(g) case final mark?)
+                Tooltip(
+                  message: 'Checked this hour',
+                  child: Text(
+                    mark,
+                    style: TextStyle(
+                      color: trading.profit,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+              const SizedBox(width: 10),
+              _cardMoreMenu(g, lastOn: lastOn),
             ],
           ),
-          Text(
-            '#${g.buOrderId} · ${category?.label ?? '1H'} · '
-            'lasting ${_formatDuration(g.duration)} · ${g.status}',
-            style: muted,
-          ),
-          if (_isLastMarked(bareBase, category) ||
-              widget.stopLossLockedIds.contains(g.buOrderId))
-            Padding(
-              padding: const EdgeInsets.only(top: 6),
-              child: Wrap(
-                spacing: 6,
-                runSpacing: 4,
-                children: [
-                  if (_isLastMarked(bareBase, category))
-                    _tagChip(
-                      label: 'Last',
-                      background: scheme.errorContainer,
-                      onBackground: scheme.onErrorContainer,
-                      switchColor: trading.loss,
-                      tooltip:
-                          'Last active — will finish naturally '
-                          'and never auto-recreate. Toggle off to cancel.',
-                      spinning: widget.cancelLastActiveRowId == g.buOrderId,
-                      busy: widget.busy,
-                      onToggleOff: () => widget.onCancelLast?.call(g),
-                    ),
-                  if (widget.stopLossLockedIds.contains(g.buOrderId))
-                    _tagChip(
-                      label: 'SL Lock',
-                      background: scheme.primaryContainer,
-                      onBackground: scheme.onPrimaryContainer,
-                      switchColor: scheme.primary,
-                      tooltip:
-                          'Stop Loss Lock active. Toggle off to disable.',
-                      spinning:
-                          widget.cancelStopLossLockActiveRowId == g.buOrderId,
-                      busy: widget.busy,
-                      onToggleOff: () => widget.onCancelStopLossLock?.call(g),
-                    ),
-                ],
+          const SizedBox(height: 2),
+          Wrap(
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              SelectableText('#${g.buOrderId}', style: muted),
+              Text(
+                '  ·  ${category?.label ?? '1H'}  ·  lasting ${_formatDuration(g.duration)}',
+                style: muted,
               ),
-            ),
+            ],
+          ),
           const SizedBox(height: 8),
           Container(
             padding: const EdgeInsets.all(10),
@@ -1031,6 +997,125 @@ class _GridsTableState extends State<GridsTable> {
           ],
         ],
       ),
+    );
+  }
+
+  /// tradingMT5's "more" menu on a running card (per the user, 2026-11-12):
+  /// a vertical-dots dropdown with the Last switch (stays open, updates in
+  /// place), Adjust margin, Add investment, Convert to manual and, after a
+  /// divider, Stop.
+  Widget _cardMoreMenu(GridBot g, {required bool lastOn}) {
+    final scheme = Theme.of(context).colorScheme;
+    return PopupMenuButton<String>(
+      tooltip: 'More',
+      constraints: const BoxConstraints(minWidth: 240),
+      child: Icon(Icons.more_vert, size: 20, color: scheme.onSurfaceVariant),
+      onSelected: (value) async {
+        switch (value) {
+          case 'margin':
+            showAdjustMarginSheet(context, bot: g);
+          case 'invest':
+            showAddInvestmentSheet(context, bot: g);
+          case 'manual':
+            widget.onBulkConvertToManual?.call([g]);
+          case 'stop':
+            final ok = await showDialog<bool>(
+              context: context,
+              builder: (context) => AlertDialog(
+                title: Text('Stop ${g.pairKey}?'),
+                content: const Text(
+                  'This closes the bot on Pionex now. This cannot be undone.',
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.of(context).pop(false),
+                    child: const Text('Cancel'),
+                  ),
+                  FilledButton(
+                    onPressed: () => Navigator.of(context).pop(true),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: Theme.of(context).colorScheme.error,
+                    ),
+                    child: const Text('Stop'),
+                  ),
+                ],
+              ),
+            );
+            if (ok == true) widget.onBulkStop?.call([g]);
+        }
+      },
+      itemBuilder: (context) {
+        var last = lastOn;
+        return [
+          PopupMenuItem<String>(
+            child: StatefulBuilder(
+              builder: (context, setLocal) => Row(
+                children: [
+                  const Icon(Icons.flag_outlined, size: 20),
+                  const SizedBox(width: 10),
+                  const Expanded(child: Text('Last')),
+                  Switch(
+                    value: last,
+                    onChanged: widget.busy
+                        ? null
+                        : (on) {
+                            if (on) {
+                              widget.onBulkLast?.call([g]);
+                            } else {
+                              widget.onCancelLast?.call(g);
+                            }
+                            setLocal(() => last = on);
+                          },
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const PopupMenuItem(
+            value: 'margin',
+            child: Row(
+              children: [
+                Icon(Icons.shield_outlined, size: 20),
+                SizedBox(width: 10),
+                Text('Adjust margin'),
+              ],
+            ),
+          ),
+          const PopupMenuItem(
+            value: 'invest',
+            child: Row(
+              children: [
+                Icon(Icons.add_circle_outline, size: 20),
+                SizedBox(width: 10),
+                Text('Add investment'),
+              ],
+            ),
+          ),
+          if (widget.onBulkConvertToManual != null)
+            const PopupMenuItem(
+              value: 'manual',
+              child: Row(
+                children: [
+                  Icon(Icons.person_outline, size: 20),
+                  SizedBox(width: 10),
+                  Text('Convert to manual'),
+                ],
+              ),
+            ),
+          const PopupMenuDivider(),
+          PopupMenuItem(
+            value: 'stop',
+            enabled: widget.onBulkStop != null && !widget.busy,
+            child: const Row(
+              children: [
+                Icon(Icons.power_settings_new, size: 20, color: Colors.red),
+                SizedBox(width: 10),
+                Text('Stop', style: TextStyle(color: Colors.red)),
+              ],
+            ),
+          ),
+        ];
+      },
     );
   }
 

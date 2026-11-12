@@ -46,67 +46,6 @@ Future<void> showBotActionsMenu(BuildContext context, {required GridBot bot}) {
   );
 }
 
-/// The Auto cards' "more" button (2026-11-12, per the user): three
-/// horizontal dots that open a dropdown list - not the bottom sheet - with
-/// the same actions as [showBotActionsMenu].
-class BotMoreMenuButton extends StatelessWidget {
-  const BotMoreMenuButton({super.key, required this.bot});
-
-  final GridBot bot;
-
-  @override
-  Widget build(BuildContext context) {
-    final error = Theme.of(context).colorScheme.error;
-    return PopupMenuButton<String>(
-      tooltip: 'More',
-      icon: const Icon(Icons.more_horiz, size: 20),
-      padding: EdgeInsets.zero,
-      onSelected: (v) {
-        switch (v) {
-          case 'margin':
-            showAdjustMarginSheet(context, bot: bot);
-          case 'invest':
-            showAddInvestmentSheet(context, bot: bot);
-          case 'stop':
-            showStopBotSheet(context, bot: bot);
-        }
-      },
-      itemBuilder: (context) => [
-        const PopupMenuItem(
-          value: 'margin',
-          child: Row(
-            children: [
-              Icon(Icons.shield_outlined, size: 20),
-              SizedBox(width: 10),
-              Text('Adjust margin'),
-            ],
-          ),
-        ),
-        const PopupMenuItem(
-          value: 'invest',
-          child: Row(
-            children: [
-              Icon(Icons.add_circle_outline, size: 20),
-              SizedBox(width: 10),
-              Text('Add investment'),
-            ],
-          ),
-        ),
-        PopupMenuItem(
-          value: 'stop',
-          child: Row(
-            children: [
-              Icon(Icons.power_settings_new, size: 20, color: error),
-              const SizedBox(width: 10),
-              Text('Stop', style: TextStyle(color: error)),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-}
-
 class _BotActionsMenu extends StatelessWidget {
   const _BotActionsMenu({required this.bot, required this.callerContext});
 

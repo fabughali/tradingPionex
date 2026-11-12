@@ -609,8 +609,12 @@ class EngineControlRepository {
   double _walletBalance(Balance bal, GridSnapshot grids) {
     var sum = bal.total > bal.free ? bal.total : bal.free;
     for (final g in [...grids.appRunning, ...grids.manualRunning]) {
+      // The bot's money NOW (Pionex's marginBalance: investment + extra
+      // margin as they are today) plus its live P&L - not the starting
+      // investment, which still counts margin SLL has since moved out
+      // (found live 2026-11-12: app 40.78 vs Pionex ~31).
       final money =
-          g.initialInvestment ??
+          g.marginBalance ??
           ((g.actualInvestment ?? 0) + (g.extraMargin ?? 0));
       sum += money + (g.profitAmount ?? 0);
     }
