@@ -204,7 +204,6 @@ class _WaitingCard extends StatelessWidget {
               Flexible(
                 child: Text(
                   symbol,
-                  overflow: TextOverflow.ellipsis,
                   style: theme.textTheme.titleMedium?.copyWith(
                     fontWeight: FontWeight.w600,
                   ),

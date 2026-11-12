@@ -794,8 +794,13 @@ class _GridsTableState extends State<GridsTable> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          // Per the user (2026-11-12): from the left - the "more" dots, the
+          // selection checkbox, a gap, then the pair and its chips. Chips
+          // wrap to a new line rather than cutting text with "...".
           Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
             children: [
+              BotMoreMenuButton(bot: g),
               if (_hasBulkActions)
                 SizedBox(
                   width: 28,
@@ -811,58 +816,52 @@ class _GridsTableState extends State<GridsTable> {
                           ),
                   ),
                 ),
-              Flexible(
-                child: InkWell(
-                  onTap: () => context.push('/bot-details', extra: g),
-                  child: Text(
-                    g.pairKey,
-                    overflow: TextOverflow.ellipsis,
-                    style: theme.textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-              ),
-              if (widget.cycleMarkerFor?.call(g) case final mark?)
-                Padding(
-                  padding: const EdgeInsets.only(left: 4),
-                  child: Tooltip(
-                    message: 'Checked this hour',
-                    child: Text(
-                      mark,
-                      style: TextStyle(
-                        color: trading.profit,
-                        fontWeight: FontWeight.bold,
+              const SizedBox(width: 10),
+              Expanded(
+                child: Wrap(
+                  spacing: 6,
+                  runSpacing: 4,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    InkWell(
+                      onTap: () => context.push('/bot-details', extra: g),
+                      child: Text(
+                        g.pairKey,
+                        style: theme.textTheme.titleMedium?.copyWith(
+                          fontWeight: FontWeight.w600,
+                        ),
                       ),
                     ),
-                  ),
+                    if (widget.cycleMarkerFor?.call(g) case final mark?)
+                      Tooltip(
+                        message: 'Checked this hour',
+                        child: Text(
+                          mark,
+                          style: TextStyle(
+                            color: trading.profit,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                    if (widget.favoriteIds.contains(g.buOrderId))
+                      const Tooltip(
+                        message: 'Favorite trade',
+                        child: Icon(Icons.star, size: 16, color: Colors.amber),
+                      ),
+                    if (g.trend != null)
+                      badge(
+                        long ? 'LONG' : 'SHORT',
+                        (long ? trading.profit : trading.loss).withValues(alpha: 0.15),
+                        long ? trading.profit : trading.loss,
+                      ),
+                    if (g.leverage != null)
+                      badge(
+                        '${g.leverage!.toStringAsFixed(0)}x',
+                        scheme.outline.withValues(alpha: 0.15),
+                        scheme.outline,
+                      ),
+                  ],
                 ),
-              if (widget.favoriteIds.contains(g.buOrderId))
-                const Padding(
-                  padding: EdgeInsets.only(left: 4),
-                  child: Tooltip(
-                    message: 'Favorite trade',
-                    child: Icon(Icons.star, size: 16, color: Colors.amber),
-                  ),
-                ),
-              if (g.trend != null)
-                badge(
-                  long ? 'LONG' : 'SHORT',
-                  (long ? trading.profit : trading.loss).withValues(alpha: 0.15),
-                  long ? trading.profit : trading.loss,
-                ),
-              if (g.leverage != null)
-                badge(
-                  '${g.leverage!.toStringAsFixed(0)}x',
-                  scheme.outline.withValues(alpha: 0.15),
-                  scheme.outline,
-                ),
-              const Spacer(),
-              IconButton(
-                icon: const Icon(Icons.settings_outlined, size: 20),
-                tooltip: 'More',
-                visualDensity: VisualDensity.compact,
-                onPressed: () => showBotActionsMenu(context, bot: g),
               ),
             ],
           ),
