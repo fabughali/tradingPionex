@@ -370,6 +370,8 @@ Future<CdpClient> _connectToOwnTab(
   int port,
   String owner, {
   String layoutId = '',
+  bool Function()? beforeOpenTab,
+  void Function()? afterOpenTab,
 }) async {
   final targets = await _chartTargets(host, port);
   final clients = <CdpClient?>[];
@@ -410,7 +412,17 @@ Future<CdpClient> _connectToOwnTab(
           : (targets.map((t) => layoutIdFromUrl(t.url)).whereType<String>().firstOrNull ??
               _lastOwnLayoutId ??
               '');
-      final opened = await _openOneChartTab(host, port, layout);
+      // The TradingView sync lock (tv_sync.dart): never open a tab while the
+      // other app is mid-action on TradingView.
+      if (beforeOpenTab != null && !beforeOpenTab()) {
+        throw CdpException(decision.error ?? 'waiting for the other app to finish with TradingView');
+      }
+      final CdpTarget? opened;
+      try {
+        opened = await _openOneChartTab(host, port, layout);
+      } finally {
+        afterOpenTab?.call();
+      }
       if (opened != null) {
         final client = await _openClient(opened);
         try {
@@ -499,12 +511,21 @@ Future<CdpClient> connectToChart(
   int port, {
   int maxRetries = 5,
   String layoutId = '',
+  bool Function()? beforeOpenTab,
+  void Function()? afterOpenTab,
 }) async {
   const baseDelay = Duration(milliseconds: 500);
   Object? lastError;
   for (var attempt = 0; attempt < maxRetries; attempt++) {
     try {
-      return await _connectToOwnTab(host, port, pionexTabOwner, layoutId: layoutId);
+      return await _connectToOwnTab(
+        host,
+        port,
+        pionexTabOwner,
+        layoutId: layoutId,
+        beforeOpenTab: beforeOpenTab,
+        afterOpenTab: afterOpenTab,
+      );
     } catch (e) {
       lastError = e;
       final delayMs = (baseDelay.inMilliseconds * (1 << attempt)).clamp(

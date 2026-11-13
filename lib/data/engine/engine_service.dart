@@ -49,6 +49,7 @@ import '../tradingview/chart_state.dart';
 import '../tradingview/enforce.dart';
 import '../tradingview/launch.dart';
 import '../tradingview/signals_reader.dart';
+import '../tradingview/tv_sync.dart';
 import '../tradingview/watchlist_reader.dart';
 
 /// The app brain — the sole trading-decision authority (PRD §1/§10 rule 1).
@@ -623,6 +624,11 @@ class EngineService {
     unawaited(_reconcileHistoryGapOnStartup());
 
     _tickHeartbeat();
+    _writeTvSyncHeartbeat();
+    _tvSyncTimer = Timer.periodic(
+      const Duration(seconds: 5),
+      (_) => _writeTvSyncHeartbeat(),
+    );
     _heartbeatTimer = Timer.periodic(
       CoreConstants.heartbeatTick,
       (_) => _tickHeartbeat(),
@@ -915,6 +921,9 @@ class EngineService {
     _autoLoopTimer1h?.cancel();
     _verifyTimer?.cancel();
     _heartbeatTimer?.cancel();
+    _tvSyncTimer?.cancel();
+    tvSync.releaseLock();
+    _writeTvSyncHeartbeat(power: false);
     _pairActionTimer?.cancel();
     _selfExitCheckTimer?.cancel();
     _pnlSettlementTimer?.cancel();
@@ -5078,8 +5087,54 @@ class EngineService {
   /// any successful connect.
   bool _ownTabReloadTried = false;
 
+  /// TradingView sync with tradingMT5 (tv_sync.dart, per the user
+  /// 2026-11-13): heartbeat, the shared lock, and restart requests.
+  final TvSync tvSync = TvSync(app: TvSync.pionex);
+  Timer? _tvSyncTimer;
+  bool _peerRestartLogged = false;
+  DateTime? _lastRestartRequestAt;
+
+  void _writeTvSyncHeartbeat({bool power = true}) {
+    try {
+      tvSync.writeHeartbeat(
+        power: power,
+        tab: _cdp != null && !_cdp!.dead ? 'claimed' : 'missing',
+        busy: _mainLoopRunning || _pairActionRunning || _anyAutoRunning,
+        tvHealthy: _cdp != null && !_cdp!.dead,
+        version: CoreConstants.appVersion,
+      );
+    } catch (_) {}
+  }
+
+  /// Opening a tab takes the shared lock; false (skip) if tradingMT5 holds it.
+  bool _lockForTabOpen() {
+    final ok = tvSync.tryLock('open_tab');
+    if (!ok) {
+      logger.log(
+        'TV SYNC: tradingMT5 holds the TradingView lock - not opening a tab now.',
+      );
+    }
+    return ok;
+  }
+
   Future<CdpClient?> _connect() async {
-    if (_cdp != null && !_cdp!.dead) {
+    // tradingMT5 is restarting TradingView: pause chart reads until it is
+    // done, instead of failing every read meanwhile.
+    if (tvSync.peerRestartingTradingView()) {
+      if (!_peerRestartLogged) {
+        _peerRestartLogged = true;
+        logger.log(
+          'TV SYNC: tradingMT5 is restarting TradingView - pausing chart reads '
+          'until it is done.',
+        );
+      }
+      _writeStatus(
+        message: 'TradingView restarting (tradingMT5) - waiting',
+        busy: false,
+      );
+      return null;
+    }
+    _peerRestartLogged = false;    if (_cdp != null && !_cdp!.dead) {
       // A TradingView restart wipes every tab's owner tag, so the tab this
       // client points at may no longer be ours - re-find it every cycle.
       if (await isOwnTab(_cdp!)) return _cdp;
@@ -5109,7 +5164,13 @@ class EngineService {
     }
     try {
       _writeStatus(message: 'Connecting to chart...', busy: true);
-      final client = await connectToChart(config.cdp.host, config.cdp.port, layoutId: config.cdp.layoutId);
+      final client = await connectToChart(
+        config.cdp.host,
+        config.cdp.port,
+        layoutId: config.cdp.layoutId,
+        beforeOpenTab: _lockForTabOpen,
+        afterOpenTab: tvSync.releaseLock,
+      );
       logger.log('CDP connected (${config.cdp.host}:${config.cdp.port})');
       final ready = await waitForChartApiReady(client);
       if (!ready) {
@@ -5155,11 +5216,27 @@ class EngineService {
     if (!_ownTabReloadTried) {
       _ownTabReloadTried = true;
       try {
-        final client = await connectToChart(config.cdp.host, config.cdp.port, layoutId: config.cdp.layoutId);
+        final client = await connectToChart(
+        config.cdp.host,
+        config.cdp.port,
+        layoutId: config.cdp.layoutId,
+        beforeOpenTab: _lockForTabOpen,
+        afterOpenTab: tvSync.releaseLock,
+      );
+        if (!tvSync.tryLock('reload_own_tab')) {
+          client.close();
+          _ownTabReloadTried = false;
+          logger.log(
+            'TV SYNC: tradingMT5 holds the TradingView lock - not reloading this '
+            'app\'s tab now; trying again later.',
+          );
+          return;
+        }
         try {
           await reloadOwnTab(client);
         } finally {
           client.close();
+          tvSync.releaseLock();
         }
         logger.log(
           'TRADINGVIEW WATCHDOG: chart did not cooperate $_forceRelaunchTradingViewThreshold '
@@ -5174,12 +5251,29 @@ class EngineService {
       }
       return;
     }
-    // Never kill TradingView: it's shared with tradingMT5's tab.
+    // Never kill TradingView: it's shared with tradingMT5's tab. Only
+    // tradingMT5 restarts it - ask it to (tv_sync.dart), at most once every
+    // 10 minutes and only while it is online.
+    final peer = tvSync.peer(TvSync.mt5);
+    final lastAsk = _lastRestartRequestAt;
+    final canAsk = peer != null &&
+        !tvSync.hasPendingRequest(to: TvSync.mt5, type: 'restart_tradingview') &&
+        (lastAsk == null ||
+            DateTime.now().difference(lastAsk) > const Duration(minutes: 10));
+    if (canAsk) {
+      _lastRestartRequestAt = DateTime.now();
+      tvSync.sendRequest(
+        to: TvSync.mt5,
+        type: 'restart_tradingview',
+        reason:
+            'TradingPionex: chart did not cooperate after reloading its own tab',
+      );
+    }
     logger.log(
       'TRADINGVIEW WATCHDOG: CDP port reachable but the chart never '
       'cooperated $_forceRelaunchTradingViewThreshold times in a row, even '
-      'after reloading this app\'s own tab - TradingView looks stuck. Not '
-      'killing it (shared with tradingMT5): restart it by hand.',
+      'after reloading this app\'s own tab - TradingView looks stuck. '
+      '${canAsk ? 'Asked tradingMT5 to restart it.' : peer == null ? 'tradingMT5 is offline - restart TradingView by hand.' : 'A restart request to tradingMT5 is already waiting.'}',
       level: 'CRITICAL',
     );
   }

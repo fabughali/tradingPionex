@@ -8,6 +8,7 @@ import '../../core/core_layout.dart';
 import '../../core/core_spacing.dart';
 import '../../core/core_theme.dart';
 import '../../data/control/engine_control_repository.dart';
+import '../../data/tradingview/tv_sync.dart';
 import '../../data/models/auto_category.dart';
 import '../../data/models/grid_bot.dart';
 import '../../data/providers/app_providers.dart';
@@ -484,6 +485,26 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
+                        // tradingMT5's state from the TradingView sync
+                        // heartbeat (tv_sync.dart, per the user 2026-11-13).
+                        Builder(
+                          builder: (context) {
+                            final peer = TvSync(app: TvSync.pionex).peer(TvSync.mt5);
+                            final lock = TvSync(app: TvSync.pionex).lockHolder();
+                            final text = peer == null
+                                ? 'tradingMT5: offline'
+                                : 'tradingMT5: online · Power ${peer.power ? 'on' : 'off'} · '
+                                      'tab ${peer.tab}${peer.busy ? ' · reading' : ''}';
+                            return Text(
+                              lock == null
+                                  ? text
+                                  : '$text · TradingView lock: ${lock.app} (${lock.action})',
+                              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                color: peer == null ? trading.warning : null,
+                              ),
+                            );
+                          },
+                        ),
                         Text(
                           status.lastPowerDownAt == null
                               ? '${l10n.dashboardLastPowerDown}: ${l10n.dashboardNeverPoweredDown}'
