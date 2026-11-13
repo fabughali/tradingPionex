@@ -621,6 +621,10 @@ class EngineControlRepository {
     return sum;
   }
 
+  /// The launch-time Power OFF (stops a leftover engine); the Dashboard's
+  /// automatic Power ON waits for it so the two can never overlap.
+  static Future<Object?>? startupCleanup;
+
   bool get isPowerOn => _storage.fileExists(_storage.powerOnFile);
 
   /// USDT the engine's SLL took out of bots' margin for a top-up that is not

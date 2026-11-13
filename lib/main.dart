@@ -60,9 +60,10 @@ Future<void> main() async {
     } catch (_) {}
   });
 
-  // Every launch starts with Power OFF: an engine left running from before
-  // (a crash, a forced close) is stopped, never silently kept.
-  unawaited(_controlRepo.powerOff());
+  // Every launch first stops an engine left running from before (a crash, a
+  // forced close); the Dashboard then powers on by itself (per the user,
+  // 2026-11-13: app open == Power on, e.g. after a Windows restart).
+  EngineControlRepository.startupCleanup = _controlRepo.powerOff();
 
   // Engine watchdog: while Power is on, a dead engine is restarted.
   final watchdogLogger = AppLogger(storage);

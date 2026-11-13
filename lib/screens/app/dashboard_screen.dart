@@ -43,6 +43,39 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     // The 1H toggle is gone (per the user, 2026-11-11): Auto always runs 1H,
     // so a 1H pause left over from before is cleared.
     ref.read(controlRepositoryProvider).resumeCategory(AutoCategory.oneHour);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _autoPowerOn());
+  }
+
+  /// Set once the user switches Power themselves - the automatic Power ON
+  /// below then stops and never overrides them.
+  bool _userSetPower = false;
+
+  /// App open == Power on (per the user, 2026-11-13 - e.g. after a Windows
+  /// restart, when the app starts with Windows). Waits for the launch-time
+  /// cleanup, then tries the normal Power ON every 30 s until its checks
+  /// pass (TradingView, Pionex, engine). Auto keeps its own saved state.
+  Future<void> _autoPowerOn() async {
+    await EngineControlRepository.startupCleanup;
+    var attempt = 0;
+    while (mounted && !_userSetPower) {
+      final repo = ref.read(controlRepositoryProvider);
+      if (repo.isPowerOn) return;
+      attempt++;
+      final ok = await _performPowerUp(repo, quiet: attempt > 1);
+      if (ok) {
+        ref.invalidate(statusReportProvider);
+        if (mounted) setState(() {});
+        return;
+      }
+      if (attempt == 1) {
+        _notify(
+          'Powering on by itself - retrying every 30 s until TradingView and '
+          'Pionex are ready.',
+          success: false,
+        );
+      }
+      await Future<void>.delayed(const Duration(seconds: 30));
+    }
   }
 
   /// Which action is currently in flight, if any — only that action's button
@@ -241,7 +274,15 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   /// up for new ones, is purely the checkup's own report; nothing here
   /// auto-starts anything.
   /// Returns whether it actually succeeded.
-  Future<bool> _performPowerUp(EngineControlRepository repo) async {
+  Future<bool> _performPowerUp(
+    EngineControlRepository repo, {
+    bool quiet = false,
+  }) async {
+    void fail(String message) {
+      repo.logUiOutcome(message, success: false);
+      if (!quiet) _notify(message, success: false);
+    }
+
     final integrations = ref.read(integrationsRepositoryProvider);
     final cdp = integrations.readCdpConfig();
 
@@ -250,7 +291,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
       port: cdp.port,
     );
     if (!tv.ok) {
-      _notify('Power-up stopped — ${tv.message}', success: false);
+      fail('Power-up stopped — ${tv.message}');
       return false;
     }
 
@@ -259,12 +300,12 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     try {
       freeBalance = (await pionex.getBalance('USDT')).free;
     } catch (e) {
-      _notify('Power-up stopped — could not reach Pionex: $e', success: false);
+      fail('Power-up stopped — could not reach Pionex: $e');
       return false;
     }
 
     if (!await repo.launchEngineIfNeeded()) {
-      _notify('Power-up stopped — the engine could not start.', success: false);
+      fail('Power-up stopped — the engine could not start.');
       return false;
     }
     repo.markPowerOn();
@@ -295,6 +336,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     StatusReport status,
     bool turnOn,
   ) async {
+    _userSetPower = true;
     try {
       if (turnOn) {
         await _performPowerUp(repo);
