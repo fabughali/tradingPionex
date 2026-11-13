@@ -5167,7 +5167,7 @@ class EngineService {
       final client = await connectToChart(
         config.cdp.host,
         config.cdp.port,
-        layoutId: config.cdp.layoutId,
+        layoutName: config.cdp.layoutName,
         beforeOpenTab: _lockForTabOpen,
         afterOpenTab: tvSync.releaseLock,
       );
@@ -5219,7 +5219,7 @@ class EngineService {
         final client = await connectToChart(
         config.cdp.host,
         config.cdp.port,
-        layoutId: config.cdp.layoutId,
+        layoutName: config.cdp.layoutName,
         beforeOpenTab: _lockForTabOpen,
         afterOpenTab: tvSync.releaseLock,
       );

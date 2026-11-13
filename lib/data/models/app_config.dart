@@ -88,28 +88,28 @@ class RiskConfig {
 }
 
 class CdpConfig {
-  const CdpConfig({this.host = '127.0.0.1', this.port = 9222, this.layoutId = ''});
+  const CdpConfig({this.host = '127.0.0.1', this.port = 9222, this.layoutName = 'Unnamed'});
 
   final String host;
   final int port;
 
-  /// The saved TradingView layout to open when this app's chart tab is
-  /// gone (`/chart/<layoutId>/`). Empty = take it from an open chart tab.
-  final String layoutId;
+  /// The saved TradingView layout (its name on TradingView's start page) to
+  /// pick when this app's chart tab is gone and it opens a new one.
+  final String layoutName;
 
   factory CdpConfig.fromJson(Map<String, dynamic>? json) {
     if (json == null) return const CdpConfig();
     return CdpConfig(
       host: json['host'] as String? ?? '127.0.0.1',
       port: (json['port'] as num?)?.toInt() ?? 9222,
-      layoutId: json['layout_id'] as String? ?? '',
+      layoutName: json['layout_name'] as String? ?? 'Unnamed',
     );
   }
 
   Map<String, dynamic> toJson() => {
     'host': host,
     'port': port,
-    if (layoutId.isNotEmpty) 'layout_id': layoutId,
+    'layout_name': layoutName,
   };
 }
 
