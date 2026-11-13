@@ -170,7 +170,52 @@ class GridsTable extends StatefulWidget {
   State<GridsTable> createState() => _GridsTableState();
 }
 
+/// Card sort (per the user, 2026-11-14), cycled by the sort button.
+enum _CardSort { aToZ, zToA, gainers, losers, duration }
+
 class _GridsTableState extends State<GridsTable> {
+  _CardSort _cardSort = _CardSort.aToZ;
+
+  List<GridBot> _sortedCards(List<GridBot> bots) {
+    double pct(GridBot g) => g.profitPercent ?? g.profitAmount ?? 0;
+    final out = [...bots];
+    switch (_cardSort) {
+      case _CardSort.aToZ:
+        out.sort((a, b) => a.pairKey.compareTo(b.pairKey));
+      case _CardSort.zToA:
+        out.sort((a, b) => b.pairKey.compareTo(a.pairKey));
+      case _CardSort.gainers:
+        out.sort((a, b) => pct(b).compareTo(pct(a)));
+      case _CardSort.losers:
+        out.sort((a, b) => pct(a).compareTo(pct(b)));
+      case _CardSort.duration:
+        out.sort(
+          (a, b) => (b.duration ?? Duration.zero).compareTo(a.duration ?? Duration.zero),
+        );
+    }
+    return out;
+  }
+
+  Widget _cardSortButton() {
+    final (icon, label) = switch (_cardSort) {
+      _CardSort.aToZ => (Icons.arrow_downward, 'A to Z'),
+      _CardSort.zToA => (Icons.arrow_upward, 'Z to A'),
+      _CardSort.gainers => (Icons.trending_up, 'Top gainers first'),
+      _CardSort.losers => (Icons.trending_down, 'Top losers first'),
+      _CardSort.duration => (Icons.schedule, 'Longest duration first'),
+    };
+    return Align(
+      alignment: Alignment.centerRight,
+      child: TextButton.icon(
+        onPressed: () => setState(
+          () => _cardSort = _CardSort.values[(_cardSort.index + 1) % _CardSort.values.length],
+        ),
+        icon: Icon(icon, size: 18),
+        label: Text(label),
+      ),
+    );
+  }
+
   final Set<String> _selected = {};
 
   /// buOrderIds a bulk action (Stop/Convert/Last) was just fired on
@@ -396,7 +441,18 @@ class _GridsTableState extends State<GridsTable> {
                             widget.onBulkConvertToAuto!(selectedBots);
                           },
                   ),
-                if (widget.onBulkConvertToManual != null)
+                if (widget.onBulkConvertToAuto != null)
+            const PopupMenuItem(
+              value: 'auto',
+              child: Row(
+                children: [
+                  Icon(Icons.smart_toy_outlined, size: 20),
+                  SizedBox(width: 10),
+                  Text('Convert to auto'),
+                ],
+              ),
+            ),
+          if (widget.onBulkConvertToManual != null)
                   ReuseButton(
                     label: 'Convert to Manual',
                     icon: Icons.person_outline,
@@ -451,7 +507,8 @@ class _GridsTableState extends State<GridsTable> {
             ),
             const SizedBox(height: CoreSpacing.sm),
           ],
-          if (widget.asCards)
+          if (widget.asCards) ...[
+            _cardSortButton(),
             LayoutBuilder(
               builder: (context, constraints) {
                 const gap = 12.0;
@@ -462,7 +519,7 @@ class _GridsTableState extends State<GridsTable> {
                   spacing: gap,
                   runSpacing: gap,
                   children: [
-                    for (final g in grids)
+                    for (final g in _sortedCards(grids))
                       SizedBox(
                         width: cardWidth,
                         child: _buildCard(g, trading),
@@ -470,8 +527,8 @@ class _GridsTableState extends State<GridsTable> {
                   ],
                 );
               },
-            )
-          else
+            ),
+          ] else
           ReuseDataTable(
             showCheckboxColumn: _hasBulkActions,
             // Select-all now lives only in the table's own header checkbox
@@ -887,12 +944,13 @@ class _GridsTableState extends State<GridsTable> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
+                      // Numbers swapped, labels kept (per the user, 2026-11-14).
                       Text('Investment', style: muted),
                       Text(
-                        usd(g.initialInvestment),
+                        usd(g.actualInvestment),
                         style: theme.textTheme.titleMedium,
                       ),
-                      Text('actual ${usd(g.actualInvestment)}', style: muted),
+                      Text('actual ${usd(g.initialInvestment)}', style: muted),
                     ],
                   ),
                 ),
@@ -1018,6 +1076,8 @@ class _GridsTableState extends State<GridsTable> {
             showAddInvestmentSheet(context, bot: g);
           case 'manual':
             widget.onBulkConvertToManual?.call([g]);
+          case 'auto':
+            widget.onBulkConvertToAuto?.call([g]);
           case 'stop':
             final ok = await showDialog<bool>(
               context: context,
@@ -1047,6 +1107,7 @@ class _GridsTableState extends State<GridsTable> {
       itemBuilder: (context) {
         var last = lastOn;
         return [
+          if (widget.onBulkLast != null || widget.onCancelLast != null)
           PopupMenuItem<String>(
             child: StatefulBuilder(
               builder: (context, setLocal) => Row(
@@ -1102,7 +1163,8 @@ class _GridsTableState extends State<GridsTable> {
                 ],
               ),
             ),
-          const PopupMenuDivider(),
+          if (widget.onBulkStop != null) const PopupMenuDivider(),
+          if (widget.onBulkStop != null)
           PopupMenuItem(
             value: 'stop',
             enabled: widget.onBulkStop != null && !widget.busy,

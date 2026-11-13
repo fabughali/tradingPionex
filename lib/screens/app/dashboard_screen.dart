@@ -17,7 +17,6 @@ import '../../utilities/util_date.dart';
 import '../../utilities/util_string.dart';
 import '../../widgets/power_off_confirm.dart';
 import '../../widgets/category_knob.dart';
-import '../../widgets/countdown_text.dart';
 import '../../widgets/grids_table.dart';
 import '../../widgets/pnl_summary_view.dart';
 import '../../widgets/waiting_bases_view.dart';
@@ -455,276 +454,165 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
               builder: (context, constraints) => ListView(
                 padding: CoreLayout.edgeMargin(constraints),
                 children: [
+                  // Engine status, as in tradingMT5 (per the user,
+                  // 2026-11-14): status lights on the left, balances on the
+                  // right; the toggles get their own section below.
                   ReuseCard(
-                    title: 'Engine',
-                    // Per the user (2026-09-09): the standalone Balance
-                    // card is gone - shown here instead, inline on the
-                    // same row as the "Engine" title, and again (same text
-                    // size, also inlined with its title) on the Next Trade
-                    // card below.
-                    trailing: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          'Pionex balance: ${UtilString.usd(status.walletBalance)}   '
-                          'Free for new trades: ',
-                          style: Theme.of(context).textTheme.titleMedium,
-                        ),
-                        Text(
-                          UtilString.usd(status.availableBalance),
-                          style: Theme.of(context).textTheme.titleMedium
-                              ?.copyWith(
-                                color: status.canOpenNewGrid
-                                    ? trading.profit
-                                    : trading.warning,
-                                fontWeight: FontWeight.w700,
-                              ),
-                        ),
-                      ],
-                    ),
-                    child: Column(
+                    child: Row(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        // tradingMT5's state from the TradingView sync
-                        // heartbeat (tv_sync.dart, per the user 2026-11-13).
-                        Builder(
-                          builder: (context) {
-                            final peer = TvSync(app: TvSync.pionex).peer(TvSync.mt5);
-                            final lock = TvSync(app: TvSync.pionex).lockHolder();
-                            final text = peer == null
-                                ? 'tradingMT5: offline'
-                                : 'tradingMT5: online · Power ${peer.power ? 'on' : 'off'} · '
-                                      'tab ${peer.tab}${peer.busy ? ' · reading' : ''}';
-                            return Text(
-                              lock == null
-                                  ? text
-                                  : '$text · TradingView lock: ${lock.app} (${lock.action})',
-                              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                                color: peer == null ? trading.warning : null,
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              _StatusDot(on: engineProcessAlive, label: 'Engine'),
+                              const SizedBox(height: 8),
+                              _StatusDot(
+                                on: engineProcessAlive &&
+                                    status.engineStatus.internetHealthy,
+                                label: 'Internet',
                               ),
-                            );
-                          },
+                              const SizedBox(height: 8),
+                              _StatusDot(
+                                on: engineProcessAlive &&
+                                    status.engineStatus.pionexHealthy,
+                                label: 'Pionex connected',
+                              ),
+                              const SizedBox(height: 8),
+                              _StatusDot(
+                                on: engineProcessAlive &&
+                                    status.engineStatus.cdpHealthy,
+                                label: 'TradingView connected',
+                              ),
+                              const SizedBox(height: 8),
+                              // tradingMT5 + the TradingView lock, from the
+                              // sync heartbeat (tv_sync.dart).
+                              Builder(
+                                builder: (context) {
+                                  final sync = TvSync(app: TvSync.pionex);
+                                  final peer = sync.peer(TvSync.mt5);
+                                  final lock = sync.lockHolder();
+                                  return Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      _StatusDot(
+                                        on: peer != null,
+                                        label: peer == null
+                                            ? 'tradingMT5: offline'
+                                            : 'tradingMT5: online, Power '
+                                                  '${peer.power ? 'on' : 'off'}, tab ${peer.tab}',
+                                      ),
+                                      const SizedBox(height: 4),
+                                      Text(
+                                        'TradingView lock: ${lock == null ? 'free' : '${lock.app} (${lock.action})'}',
+                                        style: const TextStyle(fontSize: 12),
+                                      ),
+                                    ],
+                                  );
+                                },
+                              ),
+                              const SizedBox(height: 8),
+                              Text(
+                                status.lastPowerDownAt == null
+                                    ? '${l10n.dashboardLastPowerDown}: ${l10n.dashboardNeverPoweredDown}'
+                                    : '${l10n.dashboardLastPowerDown}: ${UtilDate.dateTime(status.lastPowerDownAt!)}',
+                              ),
+                              if (powerDisplayAlive &&
+                                  !checkupRunning &&
+                                  status.engineStatus.lastCycleMessage.isNotEmpty) ...[
+                                const SizedBox(height: 8),
+                                Text(status.engineStatus.lastCycleMessage),
+                              ],
+                            ],
+                          ),
                         ),
-                        Text(
-                          status.lastPowerDownAt == null
-                              ? '${l10n.dashboardLastPowerDown}: ${l10n.dashboardNeverPoweredDown}'
-                              : '${l10n.dashboardLastPowerDown}: ${UtilDate.dateTime(status.lastPowerDownAt!)}',
-                          style: Theme.of(context).textTheme.bodySmall,
-                        ),
-                        const SizedBox(height: CoreSpacing.xs),
                         Column(
                           crossAxisAlignment: CrossAxisAlignment.end,
                           children: [
+                            _StatLine(
+                              label: 'Pionex balance',
+                              value: UtilString.usd(status.walletBalance),
+                            ),
+                            _StatLine(
+                              label: 'Free for new trades',
+                              value: UtilString.usd(status.availableBalance),
+                              color: status.canOpenNewGrid
+                                  ? trading.profit
+                                  : trading.warning,
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                  // Toggles, as in tradingMT5: Power, Auto, and the 1H box
+                  // with its check mark and the countdown to the next candle.
+                  ReuseCard(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Wrap(
+                          spacing: 24,
+                          runSpacing: 8,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          children: [
                             Row(
-                              mainAxisAlignment: MainAxisAlignment.end,
-                              // Bottom-aligned against the Power switch
-                              // itself (the last item in its Column, below
-                              // its label) rather than the default center,
-                              // which centered the button against the whole
-                              // taller label+switch stack and left it
-                              // sitting visibly higher than the switch.
-                              crossAxisAlignment: CrossAxisAlignment.end,
+                              mainAxisSize: MainAxisSize.min,
                               children: [
-                                Column(
-                                  crossAxisAlignment: CrossAxisAlignment.end,
-                                  children: [
-                                    const Text('Power'),
-                                    Row(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        // Power's OWN status word, inline
-                                        // with (not above) the switch so
-                                        // they sit centered together - the
-                                        // process's own health, deliberately
-                                        // separate from Auto's below (see
-                                        // ReuseStatusLight.evaluatePower).
-                                        Text(
-                                          powerHealth.label,
-                                          style: Theme.of(context)
-                                              .textTheme
-                                              .labelLarge
-                                              ?.copyWith(
-                                                color: powerColor,
-                                                fontWeight: FontWeight.w700,
-                                              ),
-                                        ),
-                                        const SizedBox(width: CoreSpacing.sm),
-                                        // Bound directly to the real process
-                                        // state (both directions accurate -
-                                        // Power OFF actually stops the
-                                        // process, see
-                                        // _setPower/stopEngineProcess) rather
-                                        // than any derived or locally-tracked
-                                        // flag, which is what previously let
-                                        // this drift out of sync with
-                                        // reality. No loading indicator and
-                                        // no busy-gate on onChanged - per the
-                                        // user, Power must always be
-                                        // immediately actionable. Thumb/track
-                                        // colored by the same health color as
-                                        // the status word, not just the text.
-                                        Switch(
-                                          value: powerDisplayAlive,
-                                          activeThumbColor: powerColor,
-                                          activeTrackColor: powerColor
-                                              .withValues(alpha: 0.5),
-                                          inactiveThumbColor: powerColor,
-                                          inactiveTrackColor: powerColor
-                                              .withValues(alpha: 0.3),
-                                          onChanged: (v) =>
-                                              _setPower(repo, status, v),
-                                        ),
-                                      ],
-                                    ),
-                                  ],
+                                Switch(
+                                  value: powerDisplayAlive,
+                                  activeThumbColor: powerColor,
+                                  activeTrackColor: powerColor.withValues(alpha: 0.5),
+                                  inactiveThumbColor: powerColor,
+                                  inactiveTrackColor: powerColor.withValues(alpha: 0.3),
+                                  onChanged: (v) => _setPower(repo, status, v),
+                                ),
+                                const SizedBox(width: 4),
+                                const Text('Power'),
+                                const SizedBox(width: 8),
+                                Text(
+                                  powerHealth.label,
+                                  style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                                    color: powerColor,
+                                  ),
                                 ),
                               ],
                             ),
-                            // Connectivity/health phase only - e.g.
-                            // "Checking TradingView connection...",
-                            // "Verifying chart indicators...", "Ready".
-                            // Deliberately excludes the full Red-list
-                            // sweep's own per-pair message (that's Check
-                            // Now's business now, shown next to its own
-                            // button in the Next Trade card) - per the user
-                            // (2026-09-09): "power toggle has nothing for
-                            // pairs." Bug fixed 2026-09-10: this used to
-                            // live INSIDE the same Column the Refresh button
-                            // aligned its bottom edge against - the instant
-                            // this line appeared/disappeared, that column
-                            // got taller/shorter, and Refresh visibly
-                            // shifted down/up to match the new bottom edge
-                            // even though the Switch itself never moved.
-                            // Moved outside the aligned Row entirely so
-                            // Refresh only ever aligns against the fixed-
-                            // height "Power" label + switch row, never
-                            // against this optional line.
-                            if (powerDisplayAlive &&
-                                !checkupRunning &&
-                                status.engineStatus.lastCycleMessage.isNotEmpty)
-                              Text(
-                                status.engineStatus.lastCycleMessage,
-                                style: Theme.of(context).textTheme.bodySmall,
-                              ),
-                            const SizedBox(height: CoreSpacing.xs),
                             Row(
-                              mainAxisAlignment: MainAxisAlignment.end,
+                              mainAxisSize: MainAxisSize.min,
                               children: [
-                                Column(
-                                  crossAxisAlignment: CrossAxisAlignment.end,
-                                  children: [
-                                    const Text('Auto'),
-                                    Row(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        // Auto's OWN status word (see
-                                        // ReuseStatusLight.evaluateAuto) -
-                                        // purely pause/activity, no Pionex/
-                                        // TradingView branches (that's
-                                        // Power's job above).
-                                        Text(
-                                          autoHealth.label,
-                                          style: Theme.of(context)
-                                              .textTheme
-                                              .labelLarge
-                                              ?.copyWith(
-                                                color: autoColor,
-                                                fontWeight: FontWeight.w700,
-                                              ),
-                                        ),
-                                        const SizedBox(width: CoreSpacing.sm),
-                                        // Thumb/track colored by the same
-                                        // health color as the status word,
-                                        // not just the text.
-                                        Switch(
-                                          // Per the user: if Power is off
-                                          // (the engine process isn't
-                                          // actually alive), Auto must
-                                          // visually show off too - not just
-                                          // "not working" while still
-                                          // showing on because the PAUSE
-                                          // file's last state happened to be
-                                          // "resumed" (e.g. the process died
-                                          // unexpectedly, or was stopped
-                                          // some other way, without ever
-                                          // touching PAUSE).
-                                          value:
-                                              !status.paused,
-                                          activeThumbColor: autoColor,
-                                          activeTrackColor: autoColor
-                                              .withValues(alpha: 0.5),
-                                          inactiveThumbColor: autoColor,
-                                          inactiveTrackColor: autoColor
-                                              .withValues(alpha: 0.3),
-                                          // Purely the PAUSE flag -
-                                          // independent of whether the
-                                          // engine process is alive (Power
-                                          // above). ON: resumes normal
-                                          // candle-gated auto-trading AND
-                                          // forces one immediate checkup so
-                                          // the current state is fresh right
-                                          // away, rather than waiting for
-                                          // the next candle. OFF: pauses -
-                                          // the engine will not act on the
-                                          // next candle until this is
-                                          // switched back on.
-                                          onChanged: _busy
-                                              ? null
-                                              : (v) =>
-                                                    _setAuto(repo, status, v),
-                                        ),
-                                      ],
-                                    ),
-                                    // Auto's OWN activity line -
-                                    // deliberately a separate field from
-                                    // Power's (lastCycleMessage above),
-                                    // since Checkup and Auto-checkup are two
-                                    // independent processes and must never
-                                    // show one under the other's toggle.
-                                    // Hidden entirely while Auto is off, per
-                                    // the user - even if a Last-marked bot
-                                    // is still quietly being watched in the
-                                    // background. Also hidden if Power is
-                                    // off (engine not actually alive), same
-                                    // reasoning as the switch's own value
-                                    // above.
-                                    if (!status.paused &&
-                                        engineProcessAlive &&
-                                        status
-                                            .engineStatus
-                                            .autoCheckupMessage
-                                            .isNotEmpty)
-                                      Text(
-                                        status.engineStatus.autoCheckupMessage,
-                                        style: Theme.of(
-                                          context,
-                                        ).textTheme.bodySmall,
-                                      ),
-                                  ],
+                                Switch(
+                                  value: !status.paused,
+                                  activeThumbColor: autoColor,
+                                  activeTrackColor: autoColor.withValues(alpha: 0.5),
+                                  inactiveThumbColor: autoColor,
+                                  inactiveTrackColor: autoColor.withValues(alpha: 0.3),
+                                  onChanged: _busy ? null : (v) => _setAuto(repo, status, v),
+                                ),
+                                const SizedBox(width: 4),
+                                const Text('Auto'),
+                                const SizedBox(width: 8),
+                                Text(
+                                  autoHealth.label,
+                                  style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                                    color: autoColor,
+                                  ),
                                 ),
                               ],
+                            ),
+                            _HourBox(
+                              active: !status.paused && engineProcessAlive,
+                              checked: repo.hourlyCheckRanThisHour(),
                             ),
                           ],
                         ),
                         if (!status.paused &&
                             engineProcessAlive &&
-                            status.grids.appRunning.isNotEmpty) ...[
-                          const SizedBox(height: CoreSpacing.xs),
-                          Align(
-                            alignment: Alignment.centerRight,
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Text(
-                                  'Next checkup after: ',
-                                  style: Theme.of(context).textTheme.bodySmall,
-                                ),
-                                CountdownText(
-                                  target: status.nextCheckupEta,
-                                  style: Theme.of(context).textTheme.bodySmall,
-                                ),
-                              ],
-                            ),
+                            status.engineStatus.autoCheckupMessage.isNotEmpty) ...[
+                          const SizedBox(height: 8),
+                          Text(
+                            status.engineStatus.autoCheckupMessage,
+                            style: Theme.of(context).textTheme.bodySmall,
                           ),
                         ],
                       ],
@@ -954,6 +842,8 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                     title: 'Manual bots: ${status.grids.manualRunning.length}',
                     child: GridsTable(
                       grids: status.grids.manualRunning,
+                      // Same cards as the Auto bots (per the user, 2026-11-14).
+                      asCards: true,
                       // See the matching fix/comment on the app-bots
                       // GridsTable above - same bug, same fix.
                       busy: _actionsBlocked(status, engineProcessAlive),
@@ -1005,6 +895,121 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
             ),
           );
         },
+      ),
+    );
+  }
+}
+
+/// A green / grey dot with a label - tradingMT5's status light.
+class _StatusDot extends StatelessWidget {
+  const _StatusDot({required this.on, required this.label});
+
+  final bool on;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) => Row(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      Container(
+        width: 10,
+        height: 10,
+        decoration: BoxDecoration(
+          color: on ? Colors.green : Colors.grey,
+          shape: BoxShape.circle,
+        ),
+      ),
+      const SizedBox(width: 8),
+      Flexible(child: Text(label)),
+    ],
+  );
+}
+
+/// "Label: value", right-aligned - tradingMT5's account figures.
+class _StatLine extends StatelessWidget {
+  const _StatLine({required this.label, required this.value, this.color});
+
+  final String label;
+  final String value;
+  final Color? color;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 4),
+      child: Text.rich(
+        TextSpan(
+          style: TextStyle(color: scheme.onSurfaceVariant),
+          children: [
+            TextSpan(text: '$label: '),
+            TextSpan(
+              text: value,
+              style: TextStyle(
+                fontWeight: FontWeight.w600,
+                color: color ?? scheme.onSurface,
+              ),
+            ),
+          ],
+        ),
+        textAlign: TextAlign.right,
+      ),
+    );
+  }
+}
+
+/// tradingMT5's 1H box: a check mark once this hour's Auto check has run,
+/// and a live countdown to the next hourly candle (UTC).
+class _HourBox extends StatefulWidget {
+  const _HourBox({required this.active, required this.checked});
+
+  final bool active;
+  final bool checked;
+
+  @override
+  State<_HourBox> createState() => _HourBoxState();
+}
+
+class _HourBoxState extends State<_HourBox> {
+  late final Timer _timer;
+
+  @override
+  void initState() {
+    super.initState();
+    _timer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final now = DateTime.now().toUtc();
+    final next = DateTime.utc(now.year, now.month, now.day, now.hour + 1);
+    final left = next.difference(now);
+    final m = left.inMinutes.toString().padLeft(2, '0');
+    final s = (left.inSeconds % 60).toString().padLeft(2, '0');
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        color: widget.active
+            ? scheme.secondaryContainer
+            : scheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: scheme.outlineVariant),
+      ),
+      child: Text(
+        '1H ${widget.checked ? '✓ ' : ''}$m:$s',
+        style: TextStyle(
+          fontWeight: FontWeight.w600,
+          color: widget.active ? null : scheme.onSurfaceVariant,
+        ),
       ),
     );
   }

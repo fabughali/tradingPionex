@@ -1811,6 +1811,21 @@ class EngineControlRepository {
     return at.toInt() >= hourStart.millisecondsSinceEpoch;
   }
 
+  /// True once the hourly Auto check has read any pair in the current UTC
+  /// hour - the 1H box's check mark.
+  bool hourlyCheckRanThisHour() {
+    final map = _storage.readJsonObject(_storage.cycleMarkersFile) ?? const {};
+    final now = DateTime.now().toUtc();
+    final hourStart =
+        DateTime.utc(now.year, now.month, now.day, now.hour).millisecondsSinceEpoch;
+    for (final e in map.entries) {
+      if (e.key.endsWith('|ONE_HOUR|at') && e.value is num && (e.value as num) >= hourStart) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   /// Bots the engine opened as favorite trades - shown with a star.
   Set<String> favoriteBotIds() {
     final raw = _storage.readJsonObject(_storage.favoriteTradesFile);

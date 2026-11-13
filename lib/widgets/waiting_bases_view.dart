@@ -226,6 +226,8 @@ class _WaitingCard extends StatelessWidget {
                 ),
               ),
               const Spacer(),
+              // Ignite and close sit flush at the card's right edge (per the
+              // user, 2026-11-14) - compact icons, no button padding.
               if (onIgnite != null)
                 Tooltip(
                   message: igniting
@@ -234,26 +236,32 @@ class _WaitingCard extends StatelessWidget {
                       ? 'Another pair is filling - wait for it to finish.'
                       : 'Fill now on the current signal.',
                   child: igniting
-                      ? const Padding(
-                          padding: EdgeInsets.all(10),
-                          child: SizedBox(
-                            width: 16,
-                            height: 16,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          ),
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
                         )
-                      : IconButton(
-                          icon: const Icon(Icons.bolt, size: 20),
-                          visualDensity: VisualDensity.compact,
-                          onPressed: thunderDisabled ? null : onIgnite,
+                      : InkWell(
+                          customBorder: const CircleBorder(),
+                          onTap: thunderDisabled ? null : onIgnite,
+                          child: Icon(
+                            Icons.bolt,
+                            size: 20,
+                            color: thunderDisabled
+                                ? Theme.of(context).disabledColor
+                                : null,
+                          ),
                         ),
                 ),
+              if (onIgnite != null && onStop != null) const SizedBox(width: 10),
               if (onStop != null)
-                IconButton(
-                  icon: const Icon(Icons.close, size: 18),
-                  tooltip: 'Remove from waiting.',
-                  visualDensity: VisualDensity.compact,
-                  onPressed: onStop,
+                Tooltip(
+                  message: 'Remove from waiting.',
+                  child: InkWell(
+                    customBorder: const CircleBorder(),
+                    onTap: onStop,
+                    child: const Icon(Icons.close, size: 18),
+                  ),
                 ),
             ],
           ),
