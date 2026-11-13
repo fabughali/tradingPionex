@@ -486,6 +486,13 @@ Future<CdpClient> _connectToOwnTab(
               .timeout(CoreConstants.cdpConnectTimeout);
           if (claim == 'claimed' || claim == 'mine') {
             await client.send('Runtime.enable').timeout(CoreConstants.cdpConnectTimeout);
+            // A freshly opened layout first gets every indicator closed (per
+            // the user, 2026-11-13); the engine then adds its two scripts.
+            try {
+              await client
+                  .evaluate('(function(){try{window.TradingViewApi.activeChart().removeAllStudies();return 1;}catch(e){return 0;}})()')
+                  .timeout(CoreConstants.cdpConnectTimeout);
+            } catch (_) {}
             return client;
           }
         } catch (_) {}

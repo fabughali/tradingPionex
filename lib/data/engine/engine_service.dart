@@ -1004,12 +1004,6 @@ class EngineService {
   /// of a 3-minute cycle (the problem this same fix replaced).
   static const _waitingEngineRetryCooldown = Duration(seconds: 20);
 
-  /// How long to sleep before re-checking when every waiting base is
-  /// currently on cooldown - keeps the loop responsive (picks up a newly-
-  /// eligible base quickly, still checks the chart-needed-elsewhere flags
-  /// every cycle) without busy-spinning.
-  static const _waitingEngineIdleSleep = Duration(seconds: 3);
-
   /// Consecutive genuine open-attempt failures per base (keyed same as
   /// [_waitingEngineLastAttemptAt]) - 2026-09-12, per the user: "if the
   /// waiting pair failed to start after 5 waiting cycles, app will
@@ -2676,12 +2670,15 @@ class EngineService {
         // next full 3m auto-checkup pass gets around to re-invoking this
         // function. Chart-needed-elsewhere is re-checked every time this
         // fires, so Check Now/a pair action still preempts promptly.
+        // Nothing due right now: end this pass and free the chart (found
+        // live 2026-11-13 - sleeping here held the chart for the rest of the
+        // hour, so the indicator repair and health check could never run).
+        // The Auto tick calls this again within seconds.
         _writeStatus(
           waitingEngineCurrentBase: '',
           waitingEngineIdleReason: 'cooldown',
         );
-        await Future<void>.delayed(_waitingEngineIdleSleep);
-        continue;
+        return;
       }
       logger.log(
         'autoCheckup[${category.label}] waiting engine: ${retryable.length} waiting base(s) - retrying now.',

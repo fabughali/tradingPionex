@@ -133,15 +133,15 @@ class _BothOpen {
 _BothOpen _bothOpen(_EnforceChartState state) {
   final all =
       '${state.sourceScriptIdParts.join(' ')} ${state.legendTitles.join(' ')}';
+  // Exact matches only (found live 2026-11-13): a leftover from a saved
+  // layout titled "Combined_Indicators" used to count as the RSI script, so
+  // spy_9_26 was never added while the signal reader kept failing.
   final msb =
       all.contains('USER;125eec083a7d45479dac940b5af76dc7') ||
-      RegExp('worm_10_26', caseSensitive: false).hasMatch(all);
+      all.contains('worm_10_26');
   final rsi =
       all.contains('USER;f40c0a529f954b648be8f2b530d43d3f') ||
-      RegExp(
-        'RSI|Stochastic|VAPI|Combined_Indicators|spy_9_26',
-        caseSensitive: false,
-      ).hasMatch(all);
+      all.contains('spy_9_26');
   return _BothOpen(msb, rsi);
 }
 
@@ -638,6 +638,13 @@ Future<int> _removeOtherStudiesViaApi(CdpClient cdp) async {
   return (n as num?)?.toInt() ?? 0;
 }
 
+/// Removes EVERY indicator on this app's tab with TradingView's chart API -
+/// including leftovers from a saved layout that [_removeOtherStudiesViaApi]
+/// cannot see (they show in the legend but not in getAllStudies()).
+Future<void> removeAllStudiesViaApi(CdpClient cdp) => cdp.evaluate(
+  '(function(){try{window.TradingViewApi.activeChart().removeAllStudies();return "ok";}catch(e){return "error "+e;}})()',
+);
+
 /// Names TradingView reports for the two scripts once loaded (their Pine
 /// titles, not the short saved names).
 const _enforceScriptNames = [
@@ -653,6 +660,17 @@ Future<EnforceResult?> _enforceViaApi(CdpClient cdp) async {
   try {
     await _closeAllDialogs(cdp);
     await _removeOtherStudiesViaApi(cdp);
+    // Anything else still in the legend (a saved layout's leftovers): close
+    // every indicator and add the two scripts fresh (per the user,
+    // 2026-11-13).
+    final legend = (await _getEnforceState(cdp)).legendTitles;
+    final strangers = legend.where(
+      (t) => t.isNotEmpty && !t.contains('worm_10_26') && !t.contains('spy_9_26'),
+    );
+    if (strangers.isNotEmpty) {
+      await removeAllStudiesViaApi(cdp);
+      await Future<void>.delayed(const Duration(seconds: 2));
+    }
     final addedOk = <String, bool>{};
     var state = _bothOpen(await _getEnforceState(cdp));
     for (final script in _enforceScripts) {
