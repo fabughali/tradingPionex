@@ -347,7 +347,20 @@ class PreviewChecklist extends StatefulWidget {
     this.momentum = const {},
     this.onVisibleSymbols,
     this.onShowMore,
+    this.externalSelected,
+    this.onExternalToggle,
+    this.externalBooked = 0,
   });
+
+  /// Outside selection (the Controls Pair actions "Selected" list, per the
+  /// user 2026-11-13): when [onExternalToggle] is set, ticks go to the
+  /// caller (app symbols, e.g. ETHUSDT) and survive new searches; this table
+  /// then shows no Start button or free-balance line of its own.
+  final Set<String>? externalSelected;
+  final void Function(String symbol, bool select)? onExternalToggle;
+
+  /// Investment already booked by [externalSelected].
+  final double externalBooked;
 
   final List<PreviewGridPair> entries;
 
@@ -630,13 +643,25 @@ class _PreviewChecklistState extends State<PreviewChecklist> {
 
   /// Ticking books the pair's initial investment; a pair that doesn't fit in
   /// what's left can't be ticked (per the user, 2026-11-08).
+  bool get _external => widget.onExternalToggle != null;
+
+  bool _isSelected(_RowView row) => _external
+      ? (widget.externalSelected?.contains(row.symbol) ?? false)
+      : _selected.contains(row.base);
+
   void _toggleSelection(_RowView row, bool select) {
     if (!select) {
-      setState(() => _selected.remove(row.base));
+      if (_external) {
+        widget.onExternalToggle!(row.symbol, false);
+      } else {
+        setState(() => _selected.remove(row.base));
+      }
       return;
     }
     final need = widget.investmentOf(row.symbol);
-    final left = _freeForNewTrades(_buildRows());
+    final left = _external
+        ? widget.freeBalance - widget.externalBooked
+        : _freeForNewTrades(_buildRows());
     if (need > left) {
       ScaffoldMessenger.of(context)
         ..hideCurrentSnackBar()
@@ -652,7 +677,11 @@ class _PreviewChecklistState extends State<PreviewChecklist> {
         );
       return;
     }
-    setState(() => _selected.add(row.base));
+    if (_external) {
+      widget.onExternalToggle!(row.symbol, true);
+    } else {
+      setState(() => _selected.add(row.base));
+    }
   }
 
   /// The pair's 24h % at the oldest reading (up to one hour back) and now.
@@ -795,6 +824,7 @@ class _PreviewChecklistState extends State<PreviewChecklist> {
           ),
           // Per the user (2026-11-08): what's left for new trades after the
           // Waiting pairs' bookings and the pairs ticked here.
+          if (!_external)
           Text.rich(
             TextSpan(
               children: [
@@ -892,7 +922,7 @@ class _PreviewChecklistState extends State<PreviewChecklist> {
                                   // reads its signal (per the user,
                                   // 2026-11-08 - Check Now is Pionex-only).
                                   value:
-                                      _selected.contains(row.base) &&
+                                      _isSelected(row) &&
                                       row.tradable &&
                                       !row.blocked.contains(row.category),
                                   // Always selectable regardless of balance
@@ -1014,6 +1044,7 @@ class _PreviewChecklistState extends State<PreviewChecklist> {
             ),
           ],
           const SizedBox(height: CoreSpacing.sm),
+          if (!_external)
           Align(
             alignment: Alignment.centerRight,
             child: ReuseButton(

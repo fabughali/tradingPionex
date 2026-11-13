@@ -4,6 +4,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/core_layout.dart';
 import '../../core/core_spacing.dart';
 import '../../data/control/engine_control_repository.dart';
+import '../../widgets/reuse_button.dart';
+import '../../utilities/util_string.dart';
+import '../../core/core_theme.dart';
 import '../../data/models/auto_category.dart';
 import '../../data/pionex/pionex_market.dart';
 import '../../data/providers/app_providers.dart';
@@ -196,19 +199,29 @@ class _ControlsScreenState extends ConsumerState<ControlsScreen> {
                   ),
                 ReuseCard(
                   title: 'Pair actions',
-                  child: Builder(
-                    builder: (context) {
+                  child: LayoutBuilder(
+                    builder: (context, box) {
                       // Searches Pionex's own list only - no TradingView
                       // (per the user, 2026-11-11). "eth", "ETHUSDT",
                       // "eth/usdt" all find ETH; a pair with a running or
-                      // waiting Auto trade can't be ticked.
+                      // waiting Auto trade can't be ticked. Ticks go to the
+                      // Selected list on the right (per the user,
+                      // 2026-11-13) and stay there across searches.
                       final market =
                           ref.watch(pionexMarketProvider).value ?? const [];
+                      final momentum =
+                          ref.watch(priceMomentumProvider).value?.readings ??
+                          const <String, ({double then, double now})>{};
+                      final selected = ref.watch(selectedPairsProvider);
+                      final booked = selected.fold<double>(
+                        0,
+                        (s, sym) => s + repo.pairInvestments.investmentOf(sym),
+                      );
                       final q = _searchBase(_pairController.text);
                       final found = q.isEmpty
                           ? const <MarketPair>[]
                           : market.where((m) => m.base.startsWith(q)).toList();
-                      return Column(
+                      final search = Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           TextField(
@@ -231,9 +244,8 @@ class _ControlsScreenState extends ConsumerState<ControlsScreen> {
                               entries: status.lastReport.entries,
                               freeBalance: status.availableBalance,
                               busy: _actionsBlocked(status, engineProcessAlive),
-                              startLoading: _activeAction == 'start-search',
-                              onStart: (symbols) =>
-                                  _startSymbols(repo, symbols, 'start-search'),
+                              startLoading: false,
+                              onStart: (_) async {},
                               categoryOf: (symbol) =>
                                   repo.pairCategories.categoryOf(symbol),
                               onCategoryChanged: (symbol, category) =>
@@ -247,11 +259,64 @@ class _ControlsScreenState extends ConsumerState<ControlsScreen> {
                                   _pendingChecks.contains(symbol),
                               blockedByBase: _blockedByBase(status, repo),
                               market: found,
-                              momentum:
-                                  ref.watch(priceMomentumProvider).value?.readings ??
-                                  const {},
+                              momentum: momentum,
+                              externalSelected: selected.toSet(),
+                              externalBooked: booked,
+                              onExternalToggle: (symbol, on) => ref
+                                  .read(selectedPairsProvider.notifier)
+                                  .set(symbol, on),
                             ),
                           ],
+                        ],
+                      );
+                      final panel = _SelectedPairsPanel(
+                        symbols: selected,
+                        market: market,
+                        booked: booked,
+                        freeBalance: status.availableBalance,
+                        investmentOf: (symbol) =>
+                            repo.pairInvestments.investmentOf(symbol),
+                        onInvestmentChanged: (symbol, amount) {
+                          repo.setPairInvestment(symbol, amount);
+                          setState(() {});
+                        },
+                        onRemove: (symbol) => ref
+                            .read(selectedPairsProvider.notifier)
+                            .set(symbol, false),
+                        busy: _actionsBlocked(status, engineProcessAlive),
+                        loading: _activeAction == 'start-search',
+                        onStart: () {
+                          if (booked > status.availableBalance) {
+                            _notify(
+                              'Not enough free balance: the selected pairs need '
+                              '${UtilString.usd(booked)}, only '
+                              '${UtilString.usd(status.availableBalance)} is free '
+                              'for new trades.',
+                              success: false,
+                            );
+                            return;
+                          }
+                          final symbols = [...selected];
+                          ref.read(selectedPairsProvider.notifier).clear();
+                          _startSymbols(repo, symbols, 'start-search');
+                        },
+                      );
+                      if (box.maxWidth >= 1000) {
+                        return Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Expanded(flex: 3, child: search),
+                            const SizedBox(width: CoreSpacing.md),
+                            Expanded(flex: 2, child: panel),
+                          ],
+                        );
+                      }
+                      return Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          search,
+                          const SizedBox(height: CoreSpacing.md),
+                          panel,
                         ],
                       );
                     },
@@ -342,4 +407,158 @@ class _ControlsScreenState extends ConsumerState<ControlsScreen> {
       ),
     );
   }
+}
+
+/// The Pair actions "Selected" list (per the user, 2026-11-13): every pair
+/// ticked in any search, its 24h %, editable investment and a remove button;
+/// then the total booked, what's left free, and Start selected.
+class _SelectedPairsPanel extends StatelessWidget {
+  const _SelectedPairsPanel({
+    required this.symbols,
+    required this.market,
+    required this.booked,
+    required this.freeBalance,
+    required this.investmentOf,
+    required this.onInvestmentChanged,
+    required this.onRemove,
+    required this.busy,
+    required this.loading,
+    required this.onStart,
+  });
+
+  final List<String> symbols;
+  final List<MarketPair> market;
+  final double booked;
+  final double freeBalance;
+  final double Function(String symbol) investmentOf;
+  final void Function(String symbol, double amount) onInvestmentChanged;
+  final void Function(String symbol) onRemove;
+  final bool busy;
+  final bool loading;
+  final VoidCallback onStart;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final trading = context.tradingColors;
+    final byAppSymbol = {
+      for (final m in market)
+        if (m.appSymbol != null) m.appSymbol!: m,
+    };
+    final left = freeBalance - booked;
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: scheme.outlineVariant),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Selected: ${symbols.length}',
+            style: theme.textTheme.titleMedium,
+          ),
+          const SizedBox(height: 8),
+          if (symbols.isEmpty)
+            Text(
+              'Tick pairs in the search to add them here - you can search '
+              'again and keep adding.',
+              style: theme.textTheme.bodySmall,
+            )
+          else
+            for (final sym in symbols)
+              Builder(
+                builder: (context) {
+                  final m = byAppSymbol[sym];
+                  final pct = m?.changePct;
+                  return Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            m?.displayPair ?? sym,
+                            style: const TextStyle(fontWeight: FontWeight.w600),
+                          ),
+                        ),
+                        SizedBox(
+                          width: 70,
+                          child: Text(
+                            pct == null
+                                ? '—'
+                                : '${pct >= 0 ? '+' : ''}${pct.toStringAsFixed(2)}%',
+                            style: TextStyle(
+                              color: pct == null
+                                  ? null
+                                  : (pct >= 0 ? trading.profit : trading.loss),
+                            ),
+                          ),
+                        ),
+                        SizedBox(
+                          width: 80,
+                          child: TextFormField(
+                            key: ValueKey('inv-$sym-${investmentOf(sym)}'),
+                            initialValue: _fmt(investmentOf(sym)),
+                            keyboardType: const TextInputType.numberWithOptions(
+                              decimal: true,
+                            ),
+                            decoration: const InputDecoration(
+                              isDense: true,
+                              prefixText: '\$',
+                            ),
+                            onFieldSubmitted: (v) {
+                              final amount = double.tryParse(v.trim());
+                              if (amount != null && amount > 0) {
+                                onInvestmentChanged(sym, amount);
+                              }
+                            },
+                          ),
+                        ),
+                        IconButton(
+                          tooltip: 'Remove',
+                          icon: const Icon(Icons.close, size: 18),
+                          visualDensity: VisualDensity.compact,
+                          onPressed: () => onRemove(sym),
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
+          const Divider(height: 20),
+          Text('Total booked: ${UtilString.usd(booked)}'),
+          Text.rich(
+            TextSpan(
+              children: [
+                const TextSpan(text: 'Free for new trades after: '),
+                TextSpan(
+                  text: UtilString.usd(left < 0 ? 0 : left),
+                  style: TextStyle(
+                    fontWeight: FontWeight.w700,
+                    color: left > 0 ? trading.profit : trading.warning,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 10),
+          Align(
+            alignment: Alignment.centerRight,
+            child: ReuseButton(
+              label: 'Start selected (${symbols.length})',
+              icon: Icons.rocket_launch_outlined,
+              loading: loading,
+              onPressed: (busy || symbols.isEmpty) ? null : onStart,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  static String _fmt(double v) =>
+      v == v.roundToDouble() ? v.toStringAsFixed(0) : v.toString();
 }

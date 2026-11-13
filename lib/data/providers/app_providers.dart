@@ -127,6 +127,29 @@ final priceMomentumProvider =
       }
     });
 
+/// The Controls Pair actions "Selected" list (per the user, 2026-11-13):
+/// app symbols ticked across any number of searches, kept until Start (or
+/// the app closes) so each search adds to the same list.
+class SelectedPairsNotifier extends Notifier<List<String>> {
+  @override
+  List<String> build() => const [];
+
+  void set(String symbol, bool selected) {
+    if (selected) {
+      if (!state.contains(symbol)) state = [...state, symbol];
+    } else {
+      state = [for (final s in state) if (s != symbol) s];
+    }
+  }
+
+  void clear() => state = const [];
+}
+
+final selectedPairsProvider =
+    NotifierProvider<SelectedPairsNotifier, List<String>>(
+      SelectedPairsNotifier.new,
+    );
+
 /// Tails the engine's log file, refreshed on the same cadence as the status.
 final logTailProvider = StreamProvider.autoDispose<List<String>>((ref) async* {
   final storage = ref.watch(storageProvider);
