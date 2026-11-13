@@ -235,7 +235,7 @@ abstract class AppLocalizations {
   /// No description provided for @controlsPausedNotice.
   ///
   /// In en, this message translates to:
-  /// **'The engine is force-stopped — no opens or closes will happen until you resume.'**
+  /// **'Auto is off — nothing is read, opened or closed until Auto is on. Stop-loss protection keeps running.'**
   String get controlsPausedNotice;
 
   /// No description provided for @controlsStop.

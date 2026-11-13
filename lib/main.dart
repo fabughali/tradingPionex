@@ -5,6 +5,7 @@ import 'dart:ui' show AppExitResponse;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'core/app_tray.dart';
 import 'core/core_router.dart';
 import 'core/core_storage.dart';
 import 'core/core_theme.dart';
@@ -49,6 +50,9 @@ Future<void> main() async {
       child: const TradingPionexApp(),
     ),
   );
+
+  // The app's icon next to the clock (per the user, 2026-11-14).
+  unawaited(AppTray(isPowerOn: () => _controlRepo.isPowerOn).start());
 
   // The engine watches this file: while it's fresh the engine runs; once the
   // app is gone (closed, crashed, killed) it stops going fresh and the engine
