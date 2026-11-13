@@ -5109,7 +5109,7 @@ class EngineService {
     }
     try {
       _writeStatus(message: 'Connecting to chart...', busy: true);
-      final client = await connectToChart(config.cdp.host, config.cdp.port);
+      final client = await connectToChart(config.cdp.host, config.cdp.port, layoutId: config.cdp.layoutId);
       logger.log('CDP connected (${config.cdp.host}:${config.cdp.port})');
       final ready = await waitForChartApiReady(client);
       if (!ready) {
@@ -5155,7 +5155,7 @@ class EngineService {
     if (!_ownTabReloadTried) {
       _ownTabReloadTried = true;
       try {
-        final client = await connectToChart(config.cdp.host, config.cdp.port);
+        final client = await connectToChart(config.cdp.host, config.cdp.port, layoutId: config.cdp.layoutId);
         try {
           await reloadOwnTab(client);
         } finally {

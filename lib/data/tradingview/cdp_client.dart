@@ -281,14 +281,96 @@ Future<CdpClient> _openClient(CdpTarget target) async {
   return CdpClient(socket);
 }
 
-/// Finds or claims this app's own chart tab under the shared tab-owner rule,
-/// and returns a client on it. Every other tab is only ever READ (its tag),
+/// The saved layout's ID from a chart URL (/chart/<id>/), or null.
+String? layoutIdFromUrl(String url) =>
+    RegExp(r'tradingview\.com/chart/([A-Za-z0-9]+)').firstMatch(url)?.group(1);
+
+/// Free plan: at most this many chart tabs; a third would close the oldest.
+const int maxChartTabs = 2;
+
+/// The layout this app's own tab was last seen on - used to reopen it when
+/// the tab is gone and no other chart tab shows the layout.
+String? _lastOwnLayoutId;
+
+/// One new tab per engine run at most (same rule as tradingMT5, per the user
+/// 2026-11-13: "if tradingview tab is closed, app need to check if the tab
+/// is open or not, if not, it should open new tab and select unnamed
+/// layout"). A failed attempt does not count; it is retried every 2 minutes.
+bool _openedChartTabThisProcess = false;
+DateTime? _lastChartTabOpenFailAt;
+const Duration _chartTabRetryEvery = Duration(minutes: 2);
+
+const String _chartReadyProbe = '''(function() {
+  try {
+    var wv = window.TradingViewApi && window.TradingViewApi._activeChartWidgetWV;
+    var widget = wv && wv.value && wv.value();
+    return !!(widget && widget._chartWidget && widget._chartWidget.model && widget._chartWidget.model());
+  } catch (e) { return false; }
+})()''';
+
+/// The only place this app opens anything in TradingView: one new tab on the
+/// saved layout (TradingView's own PUT new-tab call, exactly as tradingMT5
+/// does), then up to 60s for its chart to load. Never closes a tab.
+Future<CdpTarget?> _openOneChartTab(String host, int port, String layoutId) async {
+  if (_openedChartTabThisProcess || layoutId.isEmpty) return null;
+  final lastFail = _lastChartTabOpenFailAt;
+  if (lastFail != null &&
+      DateTime.now().difference(lastFail) < _chartTabRetryEvery) {
+    return null;
+  }
+  final url = 'https://www.tradingview.com/chart/$layoutId/';
+  final http = HttpClient();
+  Map<String, dynamic> created;
+  try {
+    final request = await http
+        .openUrl('PUT', Uri.parse('http://$host:$port/json/new?$url'))
+        .timeout(CoreConstants.cdpJsonListTimeout);
+    final response = await request.close().timeout(
+      CoreConstants.cdpJsonListTimeout,
+    );
+    final body = await response.transform(utf8.decoder).join();
+    if (response.statusCode != 200) {
+      _lastChartTabOpenFailAt = DateTime.now();
+      return null;
+    }
+    created = jsonDecode(body) as Map<String, dynamic>;
+  } catch (_) {
+    _lastChartTabOpenFailAt = DateTime.now();
+    return null;
+  } finally {
+    http.close(force: true);
+  }
+  _openedChartTabThisProcess = true;
+  _lastChartTabOpenFailAt = null;
+  final target = _toTarget({'type': 'page', 'url': url, ...created});
+  final deadline = DateTime.now().add(const Duration(seconds: 60));
+  while (DateTime.now().isBefore(deadline)) {
+    CdpClient? probe;
+    try {
+      probe = await _openClient(target);
+      if (await probe.evaluate(_chartReadyProbe).timeout(
+            CoreConstants.cdpConnectTimeout,
+          ) ==
+          true) {
+        return target;
+      }
+    } catch (_) {
+    } finally {
+      probe?.close();
+    }
+    await Future<void>.delayed(const Duration(seconds: 2));
+  }
+  return null;
+}
+
+/// Finds or claims this app's own chart tab under the shared tab-owner rule,/// and returns a client on it. Every other tab is only ever READ (its tag),
 /// never switched, reloaded, closed or navigated; and no tab is ever opened.
 Future<CdpClient> _connectToOwnTab(
   String host,
   int port,
-  String owner,
-) async {
+  String owner, {
+  String layoutId = '',
+}) async {
   final targets = await _chartTargets(host, port);
   final clients = <CdpClient?>[];
   final tags = <String?>[];
@@ -313,6 +395,37 @@ Future<CdpClient> _connectToOwnTab(
     }
 
     final decision = decideOwnTab(tags, owner);
+    if (decision.use != null) {
+      _lastOwnLayoutId = layoutIdFromUrl(targets[decision.use!].url) ?? _lastOwnLayoutId;
+    }
+    // Our tab is gone and none is free: open one on the saved layout, as
+    // tradingMT5 does - only when fewer than [maxChartTabs] are open.
+    final noFreeTab = decision.use == null &&
+        decision.claimOrder.isEmpty &&
+        !tags.contains(tabNoAnswer) &&
+        !tags.contains(owner);
+    if (noFreeTab && targets.length < maxChartTabs) {
+      final layout = layoutId.isNotEmpty
+          ? layoutId
+          : (targets.map((t) => layoutIdFromUrl(t.url)).whereType<String>().firstOrNull ??
+              _lastOwnLayoutId ??
+              '');
+      final opened = await _openOneChartTab(host, port, layout);
+      if (opened != null) {
+        final client = await _openClient(opened);
+        try {
+          final claim = await client
+              .evaluate(tabOwnerClaimScript(owner))
+              .timeout(CoreConstants.cdpConnectTimeout);
+          if (claim == 'claimed' || claim == 'mine') {
+            _lastOwnLayoutId = layout;
+            await client.send('Runtime.enable').timeout(CoreConstants.cdpConnectTimeout);
+            return client;
+          }
+        } catch (_) {}
+        client.close();
+      }
+    }
     if (decision.error != null) throw CdpException(decision.error!);
     var chosen = decision.use;
     for (final i in decision.claimOrder) {
@@ -385,12 +498,13 @@ Future<CdpClient> connectToChart(
   String host,
   int port, {
   int maxRetries = 5,
+  String layoutId = '',
 }) async {
   const baseDelay = Duration(milliseconds: 500);
   Object? lastError;
   for (var attempt = 0; attempt < maxRetries; attempt++) {
     try {
-      return await _connectToOwnTab(host, port, pionexTabOwner);
+      return await _connectToOwnTab(host, port, pionexTabOwner, layoutId: layoutId);
     } catch (e) {
       lastError = e;
       final delayMs = (baseDelay.inMilliseconds * (1 << attempt)).clamp(

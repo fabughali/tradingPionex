@@ -51,7 +51,7 @@ void main() {
     );
   });
 
-  test('no code opens, closes, navigates or kills tabs or TradingView', () {
+  test('no code closes, navigates or kills tabs or TradingView; one tab-open path', () {
     // TradingView is shared with another app's live tab. Opening a tab can
     // push the free plan past its 2 chart connections and close the other
     // app's; navigating or closing would take it over; killing by name would
@@ -65,7 +65,6 @@ void main() {
       'location assignment': RegExp(
         r'location\.(assign|replace)\s*\(|location\.href\s*=[^=]|location\s*=[^=]',
       ),
-      '/json/new': RegExp(r'/json/new'),
       '/json/close': RegExp(r'/json/close'),
       '/json/activate': RegExp(r'/json/activate'),
       // Killing by image name would take TradingView (or anything else
@@ -97,5 +96,15 @@ void main() {
       }
     }
     expect(taskkillCalls, ["Process.run('taskkill', ['/F', '/PID', '\$pid'])"]);
+
+    // The one tab this app may open (per the user, 2026-11-13, same as
+    // tradingMT5): /json/new, only in cdp_client.dart's _openOneChartTab.
+    final jsonNew = <String>[];
+    for (final f in Directory('lib').listSync(recursive: true)) {
+      if (f is! File || !f.path.endsWith('.dart')) continue;
+      final n = RegExp(r'/json/new').allMatches(f.readAsStringSync()).length;
+      if (n > 0) jsonNew.add('${f.path.replaceAll('\\', '/')}:$n');
+    }
+    expect(jsonNew, ['lib/data/tradingview/cdp_client.dart:1']);
   });
 }
