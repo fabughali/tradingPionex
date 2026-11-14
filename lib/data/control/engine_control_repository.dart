@@ -1826,6 +1826,20 @@ class EngineControlRepository {
     return false;
   }
 
+  /// Every "BASE|CATEGORY" the hourly Auto check read in the current UTC
+  /// hour, in one file read (the dashboard calls this once per refresh).
+  Set<String> checkedThisHourKeys() {
+    final map = _storage.readJsonObject(_storage.cycleMarkersFile) ?? const {};
+    final now = DateTime.now().toUtc();
+    final hourStart =
+        DateTime.utc(now.year, now.month, now.day, now.hour).millisecondsSinceEpoch;
+    return {
+      for (final e in map.entries)
+        if (e.key.endsWith('|at') && e.value is num && (e.value as num) >= hourStart)
+          e.key.substring(0, e.key.length - 3),
+    };
+  }
+
   /// Bots the engine opened as favorite trades - shown with a star.
   Set<String> favoriteBotIds() {
     final raw = _storage.readJsonObject(_storage.favoriteTradesFile);

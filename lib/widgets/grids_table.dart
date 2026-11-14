@@ -49,6 +49,7 @@ class GridsTable extends StatefulWidget {
     this.entrySignalFor,
     this.closeCandidateFor,
     this.asCards = false,
+    this.cardSort,
     this.favoriteIds = const {},
   });
 
@@ -57,6 +58,10 @@ class GridsTable extends StatefulWidget {
 
   /// tradingMT5-style running cards instead of the table (Auto bots).
   final bool asCards;
+
+  /// The cards' sort when the caller shows the sort icon itself (the Auto
+  /// bots title); null = this widget shows its own icon.
+  final CardSort? cardSort;
 
   final List<GridBot> grids;
   final bool busy;
@@ -170,25 +175,48 @@ class GridsTable extends StatefulWidget {
   State<GridsTable> createState() => _GridsTableState();
 }
 
-/// Card sort (per the user, 2026-11-14), cycled by the sort button.
-enum _CardSort { aToZ, zToA, gainers, losers, duration }
+/// Card sort (per the user, 2026-11-14), cycled by the sort icon.
+enum CardSort { aToZ, zToA, gainers, losers, duration }
+
+/// The sort as an icon-only button (per the user: next to the Auto bots
+/// count, no text); its tooltip names the current sort.
+Widget cardSortIconButton(CardSort sort, VoidCallback onPressed) {
+  final (icon, label) = switch (sort) {
+    CardSort.aToZ => (Icons.arrow_downward, 'A to Z'),
+    CardSort.zToA => (Icons.arrow_upward, 'Z to A'),
+    CardSort.gainers => (Icons.trending_up, 'Top gainers first'),
+    CardSort.losers => (Icons.trending_down, 'Top losers first'),
+    CardSort.duration => (Icons.schedule, 'Longest duration first'),
+  };
+  return IconButton(
+    tooltip: label,
+    icon: Icon(icon, size: 20),
+    visualDensity: VisualDensity.compact,
+    onPressed: onPressed,
+  );
+}
+
+CardSort nextCardSort(CardSort s) =>
+    CardSort.values[(s.index + 1) % CardSort.values.length];
 
 class _GridsTableState extends State<GridsTable> {
-  _CardSort _cardSort = _CardSort.aToZ;
+  CardSort _ownCardSort = CardSort.aToZ;
+  CardSort get _cardSort => widget.cardSort ?? _ownCardSort;
+  set _cardSort(CardSort v) => _ownCardSort = v;
 
   List<GridBot> _sortedCards(List<GridBot> bots) {
     double pct(GridBot g) => g.profitPercent ?? g.profitAmount ?? 0;
     final out = [...bots];
     switch (_cardSort) {
-      case _CardSort.aToZ:
+      case CardSort.aToZ:
         out.sort((a, b) => a.pairKey.compareTo(b.pairKey));
-      case _CardSort.zToA:
+      case CardSort.zToA:
         out.sort((a, b) => b.pairKey.compareTo(a.pairKey));
-      case _CardSort.gainers:
+      case CardSort.gainers:
         out.sort((a, b) => pct(b).compareTo(pct(a)));
-      case _CardSort.losers:
+      case CardSort.losers:
         out.sort((a, b) => pct(a).compareTo(pct(b)));
-      case _CardSort.duration:
+      case CardSort.duration:
         out.sort(
           (a, b) => (b.duration ?? Duration.zero).compareTo(a.duration ?? Duration.zero),
         );
@@ -196,25 +224,14 @@ class _GridsTableState extends State<GridsTable> {
     return out;
   }
 
-  Widget _cardSortButton() {
-    final (icon, label) = switch (_cardSort) {
-      _CardSort.aToZ => (Icons.arrow_downward, 'A to Z'),
-      _CardSort.zToA => (Icons.arrow_upward, 'Z to A'),
-      _CardSort.gainers => (Icons.trending_up, 'Top gainers first'),
-      _CardSort.losers => (Icons.trending_down, 'Top losers first'),
-      _CardSort.duration => (Icons.schedule, 'Longest duration first'),
-    };
-    return Align(
-      alignment: Alignment.centerRight,
-      child: TextButton.icon(
-        onPressed: () => setState(
-          () => _cardSort = _CardSort.values[(_cardSort.index + 1) % _CardSort.values.length],
-        ),
-        icon: Icon(icon, size: 18),
-        label: Text(label),
-      ),
-    );
-  }
+  Widget _cardSortButton() => Align(
+    alignment: Alignment.centerRight,
+    child: cardSortIconButton(
+      _cardSort,
+      () => setState(() => _cardSort = nextCardSort(_cardSort)),
+    ),
+  );
+
 
   final Set<String> _selected = {};
 
@@ -508,7 +525,7 @@ class _GridsTableState extends State<GridsTable> {
             const SizedBox(height: CoreSpacing.sm),
           ],
           if (widget.asCards) ...[
-            _cardSortButton(),
+            if (widget.cardSort == null) _cardSortButton(),
             LayoutBuilder(
               builder: (context, constraints) {
                 const gap = 12.0;
@@ -944,13 +961,14 @@ class _GridsTableState extends State<GridsTable> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      // Numbers swapped, labels kept (per the user, 2026-11-14).
-                      Text('Investment', style: muted),
+                      // Titles per the user (2026-11-14): the actual investment
+                      // is titled "Actual investment"; the other is "investment".
+                      Text('Actual investment', style: muted),
                       Text(
                         usd(g.actualInvestment),
                         style: theme.textTheme.titleMedium,
                       ),
-                      Text('actual ${usd(g.initialInvestment)}', style: muted),
+                      Text('investment ${usd(g.initialInvestment)}', style: muted),
                     ],
                   ),
                 ),

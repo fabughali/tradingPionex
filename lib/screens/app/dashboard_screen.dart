@@ -50,6 +50,9 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   /// below then stops and never overrides them.
   bool _userSetPower = false;
 
+  /// The Auto cards' sort, chosen by the icon next to the count.
+  CardSort _autoSort = CardSort.aToZ;
+
   /// App open == Power on (per the user, 2026-11-13 - e.g. after a Windows
   /// restart, when the app starts with Windows). Waits for the launch-time
   /// cleanup, then tries the normal Power ON every 30 s until its checks
@@ -123,13 +126,14 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
 
 
   Timer? _blinkTimer;
-  bool _blinkOn = true;
+  final ValueNotifier<bool> _blink = ValueNotifier(true);
   bool _blinkFast = false;
   String? _lastHealthLabel;
 
   @override
   void dispose() {
     _blinkTimer?.cancel();
+    _blink.dispose();
     super.dispose();
   }
 
@@ -143,15 +147,18 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     if (needed && (_blinkTimer == null || _blinkFast != fast)) {
       _blinkTimer?.cancel();
       _blinkFast = fast;
+      // Only the blinking status words/switches repaint - not the whole
+      // dashboard (found 2026-11-14: a full setState every 180-500 ms, each
+      // re-reading files, froze scrolling and resizing during Auto checks).
       _blinkTimer = Timer.periodic(Duration(milliseconds: fast ? 180 : 500), (
         _,
       ) {
-        if (mounted) setState(() => _blinkOn = !_blinkOn);
+        if (mounted) _blink.value = !_blink.value;
       });
     } else if (!needed && _blinkTimer != null) {
       _blinkTimer!.cancel();
       _blinkTimer = null;
-      _blinkOn = true;
+      _blink.value = true;
     }
   }
 
@@ -437,17 +444,18 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
             fast: powerHealth.urgent || autoHealth.urgent,
           );
           _notifyHealthChange(autoHealth);
-          var powerColor = ReuseStatusLight.colorFor(
+          final powerBaseColor = ReuseStatusLight.colorFor(
             context,
             powerHealth.color,
           );
-          if (powerHealth.blinking && !_blinkOn) {
-            powerColor = powerColor.withValues(alpha: 0.35);
-          }
-          var autoColor = ReuseStatusLight.colorFor(context, autoHealth.color);
-          if (autoHealth.blinking && !_blinkOn) {
-            autoColor = autoColor.withValues(alpha: 0.35);
-          }
+          final autoBaseColor = ReuseStatusLight.colorFor(
+            context,
+            autoHealth.color,
+          );
+          Color dimmed(Color c, bool blinking, bool on) =>
+              blinking && !on ? c.withValues(alpha: 0.35) : c;
+          // Read once per refresh, not once per card.
+          final checkedNow = repo.checkedThisHourKeys();
           return RefreshIndicator(
             onRefresh: () async => ref.invalidate(statusReportProvider),
             child: LayoutBuilder(
@@ -556,49 +564,69 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                           runSpacing: 8,
                           crossAxisAlignment: WrapCrossAlignment.center,
                           children: [
-                            Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Switch(
-                                  value: powerDisplayAlive,
-                                  activeThumbColor: powerColor,
-                                  activeTrackColor: powerColor.withValues(alpha: 0.5),
-                                  inactiveThumbColor: powerColor,
-                                  inactiveTrackColor: powerColor.withValues(alpha: 0.3),
-                                  onChanged: (v) => _setPower(repo, status, v),
-                                ),
-                                const SizedBox(width: 4),
-                                const Text('Power'),
-                                const SizedBox(width: 8),
-                                Text(
-                                  powerHealth.label,
-                                  style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                                    color: powerColor,
-                                  ),
-                                ),
-                              ],
+                            ValueListenableBuilder<bool>(
+                              valueListenable: _blink,
+                              builder: (context, on, _) {
+                                final powerColor = dimmed(
+                                  powerBaseColor,
+                                  powerHealth.blinking,
+                                  on,
+                                );
+                                return Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Switch(
+                                      value: powerDisplayAlive,
+                                      activeThumbColor: powerColor,
+                                      activeTrackColor: powerColor.withValues(alpha: 0.5),
+                                      inactiveThumbColor: powerColor,
+                                      inactiveTrackColor: powerColor.withValues(alpha: 0.3),
+                                      onChanged: (v) => _setPower(repo, status, v),
+                                    ),
+                                    const SizedBox(width: 4),
+                                    const Text('Power'),
+                                    const SizedBox(width: 8),
+                                    Text(
+                                      powerHealth.label,
+                                      style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                                        color: powerColor,
+                                      ),
+                                    ),
+                                  ],
+                                );
+                              },
                             ),
-                            Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Switch(
-                                  value: !status.paused,
-                                  activeThumbColor: autoColor,
-                                  activeTrackColor: autoColor.withValues(alpha: 0.5),
-                                  inactiveThumbColor: autoColor,
-                                  inactiveTrackColor: autoColor.withValues(alpha: 0.3),
-                                  onChanged: _busy ? null : (v) => _setAuto(repo, status, v),
-                                ),
-                                const SizedBox(width: 4),
-                                const Text('Auto'),
-                                const SizedBox(width: 8),
-                                Text(
-                                  autoHealth.label,
-                                  style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                                    color: autoColor,
-                                  ),
-                                ),
-                              ],
+                            ValueListenableBuilder<bool>(
+                              valueListenable: _blink,
+                              builder: (context, on, _) {
+                                final autoColor = dimmed(
+                                  autoBaseColor,
+                                  autoHealth.blinking,
+                                  on,
+                                );
+                                return Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Switch(
+                                      value: !status.paused,
+                                      activeThumbColor: autoColor,
+                                      activeTrackColor: autoColor.withValues(alpha: 0.5),
+                                      inactiveThumbColor: autoColor,
+                                      inactiveTrackColor: autoColor.withValues(alpha: 0.3),
+                                      onChanged: _busy ? null : (v) => _setAuto(repo, status, v),
+                                    ),
+                                    const SizedBox(width: 4),
+                                    const Text('Auto'),
+                                    const SizedBox(width: 8),
+                                    Text(
+                                      autoHealth.label,
+                                      style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                                        color: autoColor,
+                                      ),
+                                    ),
+                                  ],
+                                );
+                              },
                             ),
                             _HourBox(
                               active: !status.paused && engineProcessAlive,
@@ -650,16 +678,21 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                                               status.grids.appRunning.isNotEmpty,
                                         ),
                                         const SizedBox(width: CoreSpacing.sm),
-                                        Expanded(
-                                          child: Text(
-                                            'Auto bots: ${status.grids.appRunning.length}',
-                                            overflow: TextOverflow.ellipsis,
-                                            maxLines: 1,
-                                            style: Theme.of(
-                                              context,
-                                            ).textTheme.titleMedium,
+                                        Text(
+                                          'Auto bots: ${status.grids.appRunning.length}',
+                                          style: Theme.of(
+                                            context,
+                                          ).textTheme.titleMedium,
+                                        ),
+                                        // Sort icon right after the count
+                                        // (per the user, 2026-11-14).
+                                        cardSortIconButton(
+                                          _autoSort,
+                                          () => setState(
+                                            () => _autoSort = nextCardSort(_autoSort),
                                           ),
                                         ),
+                                        const Spacer(),
                                       ],
                                     ),
                                   ],
@@ -685,6 +718,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                         GridsTable(
                       grids: status.grids.appRunning,
                       asCards: true,
+                      cardSort: _autoSort,
                       // Bug fixed 2026-09-16, per the user: "stop, last,
                       // convert manual, convert auto: all those action
                       // buttons should be disabled once power off" - this
@@ -716,7 +750,9 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                         final category =
                             repo.botCategories.categoryOf(bot.buOrderId) ??
                             AutoCategory.oneHour;
-                        return repo.checkedThisHour(bareBase, category)
+                        return checkedNow.contains(
+                              '$bareBase|${category.wireValue}',
+                            )
                             ? '✓'
                             : null;
                       },

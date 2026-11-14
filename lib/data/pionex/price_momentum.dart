@@ -14,9 +14,19 @@ class PriceMomentum {
   /// When the latest reading was taken, or null if none.
   DateTime? get lastAt => _snaps.isEmpty ? null : _snaps.last.at;
 
+  /// Keeps one snapshot per minute plus the latest one (found 2026-11-14:
+  /// 5-second snapshots for a full hour - ~720 x 400 values - were scanned
+  /// every 5 s on the app window's thread and froze it). "One hour ago vs
+  /// now" stays the same to within a minute.
   void add(DateTime at, Map<String, double> prices) {
     if (prices.isEmpty) return;
-    _snaps.add((at: at, prices: Map.unmodifiable(prices)));
+    final snap = (at: at, prices: Map<String, double>.unmodifiable(prices));
+    if (_snaps.length >= 2 &&
+        at.difference(_snaps[_snaps.length - 2].at) < const Duration(minutes: 1)) {
+      _snaps[_snaps.length - 1] = snap;
+    } else {
+      _snaps.add(snap);
+    }
     final cutoff = at.subtract(window);
     _snaps.removeWhere((s) => s.at.isBefore(cutoff));
   }
