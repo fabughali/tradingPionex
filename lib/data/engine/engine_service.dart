@@ -165,11 +165,6 @@ class EngineService {
   /// - see the resync call site in `_refreshActiveGrids`.
   bool _riskGateResynced = false;
 
-  /// "Running vs working" cycle counter, keyed by buOrderId - how many
-  /// consecutive auto-checkup cycles a running app bot has shown zero
-  /// position (never filled). See the check site in `_runAutoCheckup`.
-  /// Added 2026-09-16, per the user.
-  final Map<String, int> _pnlCheckCycleCount = {};
 
   /// One-time per-bot investment-field dump - see the log call site in
   /// _refreshActiveGrids.
@@ -498,10 +493,6 @@ class EngineService {
   /// profit-lock optimization, not a real trading signal.
   Timer? _stopLossLockTimer;
 
-  /// Drives [_runNeverFilledSweep] - fixed 3-minute cadence, independent of
-  /// any [AutoCategory]'s own candle-gated cycle (2026-09-27, per the
-  /// user's exact request).
-  Timer? _neverFilledCheckTimer;
 
   /// True only while [_runStopLossLockSweep] is actively holding the chart
   /// (switching symbols, reading the oscillator) - folded into every other
@@ -662,10 +653,9 @@ class EngineService {
       const Duration(seconds: 5),
       (_) => unawaited(_runSllSweep()),
     );
-    _neverFilledCheckTimer = Timer.periodic(
-      const Duration(minutes: 3),
-      (_) => unawaited(_runNeverFilledSweep()),
-    );
+    // The 3-minute "never filled" auto-cancel was removed 2026-11-15, per
+    // the user: a trade is closed only by the hybrid decision (Close A and
+    // Close B confirmed), never by a separate app check.
   }
 
   /// Per the user (2026-09-14): "i want engine stop when there is no auto
@@ -929,7 +919,6 @@ class EngineService {
     _pnlSettlementTimer?.cancel();
     _tpSlRatchetTimer?.cancel();
     _stopLossLockTimer?.cancel();
-    _neverFilledCheckTimer?.cancel();
     _cdp?.close();
   }
 
@@ -1225,7 +1214,12 @@ class EngineService {
   ) {
     final pending =
         storage.readJsonObject(storage.pendingInvestmentsFile) ?? {};
-    final key = '${base.toUpperCase()}|${category.wireValue}';
+    // Bare base ("AVAX"), the key the Waiting card reads - a Pionex base
+    // ("AVAX.PERP") used to be written as-is, so the card never found the
+    // booked amount and showed the $10 default (found 2026-11-15).
+    final bare = base.toUpperCase().replaceAll(RegExp(r'\.PERP$'), '');
+    final key = '$bare|${category.wireValue}';
+    pending.remove('$bare.PERP|${category.wireValue}');
     if (amount == null) {
       pending.remove(key);
     } else {
@@ -6789,112 +6783,6 @@ class EngineService {
       '(\$${actual.toStringAsFixed(2)} -> \$${(actual + amount).toStringAsFixed(2)}).',
     );
   }
-
-  /// "Never filled" zero-position safety check (2026-09-27, per the user:
-  /// "i want you to change the cycle per each interval to be 3 min ...
-  /// even if the interval is 3m/5m/15m/1H/1D"). Previously lived inline in
-  /// [_runAutoCheckup], gated by that category's own candle boundary - for
-  /// a 1H-tagged bot that meant up to 2 hours before a genuinely
-  /// never-filled grid got cancelled. Now a fixed 3-minute sweep,
-  /// completely independent of category: every app-initiated grid still
-  /// showing zero real Pionex position (`positionSize`) on its SECOND
-  /// consecutive 3-minute check gets cancelled outright - nothing filled,
-  /// so there's no position to unwind and no P/L to recycle, just a real
-  /// Pionex cancel. Needs no chart/CDP access at all (pure Pionex REST +
-  /// local state), so unlike [_runStopLossLockSweep] it never has to yield
-  /// the chart to anything.
-  ///
-  /// Per the user ("yes .. and the bot will be recycled if not tagged with
-  /// last"): deliberately does NOT call `retired.addRetiredBases(...)`
-  /// (unlike the old inline version did) - the base simply falls back to
-  /// its normal auto-managed list with no running grid, so the waiting
-  /// engine picks it up and recycles it again on the very next pass,
-  /// exactly like any other close. It only stays unfilled-and-idle if the
-  /// user separately tagged that exact (base, category) Last, same gate
-  /// every other recycle path already respects.
-  Future<void> _runNeverFilledSweep() async {
-    // Auto off = the engine does nothing at all (per the user, 2026-11-08).
-    if (_forceStopActive()) return;
-    if (!pionex.available) return;
-    // Safe, idempotent, already called from half a dozen other sites in
-    // this file (see `_runStopLossLockSweep`'s own copy of this same
-    // comment) - this sweep runs on its own independent 3-minute timer, so
-    // it can't assume some other track already refreshed recently.
-    await _refreshActiveGrids();
-    for (final grid in _activeGridsById.values.toList()) {
-      if (!grid.appInitiated) continue;
-      final pnlCheckId = grid.buOrderId;
-      final hasMoved = (grid.positionSize ?? 0) != 0;
-      if (hasMoved) {
-        _pnlCheckCycleCount.remove(pnlCheckId);
-        continue;
-      }
-      final seen = (_pnlCheckCycleCount[pnlCheckId] ?? 0) + 1;
-      if (seen < 2) {
-        _pnlCheckCycleCount[pnlCheckId] = seen;
-        continue;
-      }
-      _pnlCheckCycleCount.remove(pnlCheckId);
-      final category = botCategories.categoryOf(pnlCheckId) ?? AutoCategory.oneHour;
-      final symbol = grid.tickerSymbol;
-      final base = _baseOf(symbol);
-      final tag = '[${category.label}]';
-      logger.log(
-        'PNL CHECK $symbol$tag: buOrderId=$pnlCheckId still shows zero position after $seen 3-minute checks - '
-        'not working, cancelling.',
-        level: 'ERROR',
-      );
-      try {
-        await pionex.cancelFuturesGrid(buOrderId: pnlCheckId);
-        createdBots.forgetBot(pnlCheckId);
-        botCategories.forget(pnlCheckId);
-        tpSlRatchet.forget(pnlCheckId);
-        stopLossLockState.forget(pnlCheckId);
-        _stopLossLockSlCleared.remove(pnlCheckId);
-        _activeGridsById.remove(pnlCheckId);
-        risk.closePosition(symbol, category);
-        _openEntryByPair.remove('${_gridKey(base)}|${category.wireValue}');
-        final neverFilledEntrySignal = entrySignalStore.recordFor(pnlCheckId);
-        entrySignalStore.forget(pnlCheckId);
-        _recordHistory(
-          BotHistoryEntry(
-            id: BotHistoryEntry.newId(),
-            ts: DateTime.now(),
-            kind: BotHistoryKind.terminated,
-            pairKey: _gridKey(base),
-            base: base,
-            buOrderId: pnlCheckId,
-            category: category,
-            direction: grid.trend ?? GridDirection.long,
-            entryPrice: grid.entryPrice ?? 0,
-            exitPrice: grid.entryPrice ?? 0,
-            initialInvestment: pairInvestments.investmentOf(symbol),
-            realizedProfit: 0,
-            startTime: grid.startTime ?? DateTime.now(),
-            endTime: DateTime.now(),
-            detail: _withTerminationContext(
-              'Cancelled automatically - zero position after $seen 3-minute checks (never filled).',
-              base,
-              category,
-              realizedProfit: 0,
-            ),
-          ).withEntrySignal(
-            openSignalType: neverFilledEntrySignal?.open.type,
-            openSignalZone: neverFilledEntrySignal?.open.zone,
-            openSignalValue: neverFilledEntrySignal?.open.value,
-            openSignalAt: neverFilledEntrySignal?.open.at,
-            stopReason: 'never_filled',
-          ),
-        );
-      } catch (e) {
-        logger.log(
-          'PNL CHECK $symbol$tag: cancel failed for $pnlCheckId: $e',
-          level: 'ERROR',
-        );
-      }
-    }
-  }
-
 
   Future<List<String>> _readRedList(CdpClient cdp) async {
     WatchlistReading watchlist;

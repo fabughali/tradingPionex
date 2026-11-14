@@ -1339,7 +1339,10 @@ class EngineControlRepository {
         if (running.contains(base)) continue;
         if (retired.isRetiredBase(base, category)) continue;
         final key = '$base|${category.wireValue}';
-        final pendingAmount = (pending[key] as num?)?.toDouble();
+        // Older engines wrote a Pionex base ("AVAX.PERP|..."); read both.
+        final pendingAmount = ((pending[key] ??
+                    pending['$base.PERP|${category.wireValue}']) as num?)
+            ?.toDouble();
         final investment =
             pendingAmount ?? pairInvestments.investmentOf('${base}USDT');
         result.add((base: base, category: category, investment: investment));
