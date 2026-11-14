@@ -263,6 +263,12 @@ class CoreStorage {
   String get pendingInvestmentsFile =>
       p.join(logsDir, 'pending-investments.json');
 
+  /// The Waiting engine's consecutive real open failures per
+  /// `"CATEGORY|BASE"` - kept on disk so an engine restart no longer resets
+  /// the 5-strike count (found 2026-11-14: AKE sat at 4/5 for two days
+  /// because every restart started it again at 1).
+  String get waitingStrikesFile => p.join(logsDir, 'waiting-strikes.json');
+
   /// The symbols a multi-symbol Start request is currently still working
   /// through - written by the engine, read by the GUI so a user-initiated
   /// pair still waiting to be checked shows in the Auto bots card's

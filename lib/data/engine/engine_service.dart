@@ -1022,7 +1022,28 @@ class EngineService {
   /// `createBlocked` in `_manageGridPair`), and a genuinely successful
   /// manual Start clears the retirement automatically (same as any other
   /// brand-new grid), so the user can always choose it there again.
-  final Map<String, int> _waitingEngineFailCount = {};
+  ///
+  /// Kept on disk ([CoreStorage.waitingStrikesFile]), so an engine restart
+  /// does not reset the count (2026-11-14: AKE's strikes went 4/5 -> 1/5 on
+  /// every restart and it was never retired).
+  late final Map<String, int> _waitingEngineFailCount = () {
+    final out = <String, int>{};
+    try {
+      (storage.readJsonObject(storage.waitingStrikesFile) ?? const {})
+          .forEach((k, v) {
+        if (v is num && v > 0) out[k] = v.toInt();
+      });
+    } catch (_) {}
+    return out;
+  }();
+
+  void _saveWaitingStrikes() {
+    try {
+      storage.writeJson(storage.waitingStrikesFile, _waitingEngineFailCount);
+    } catch (e) {
+      logger.log('waiting strikes: could not save ($e)', level: 'ERROR');
+    }
+  }
 
   /// See [_waitingEngineFailCount]'s doc - confirmed live against
   /// XRPUSDT (100+ consecutive real Pionex rejections with the identical
@@ -2770,7 +2791,9 @@ class EngineService {
         final triedKey = _waitingEngineTriedKey(cat, base);
         final entryKey = '${_gridKey(base)}|${cat.wireValue}';
         if (_openEntryByPair.containsKey(entryKey)) {
-          _waitingEngineFailCount.remove(triedKey);
+          if (_waitingEngineFailCount.remove(triedKey) != null) {
+            _saveWaitingStrikes();
+          }
         } else if (_lastCreateSkipReason == null) {
           final fails = (_waitingEngineFailCount[triedKey] ?? 0) + 1;
           if (fails >= _waitingEngineMaxFailuresBeforeTerminate) {
@@ -2790,6 +2813,7 @@ class EngineService {
               '$symbol failed to open (strike $fails/$_waitingEngineMaxFailuresBeforeTerminate).',
             );
           }
+          _saveWaitingStrikes();
         }
       }
     }
