@@ -289,6 +289,13 @@ const int maxChartTabs = 2;
 /// is open or not, if not, it should open new tab and select unnamed
 /// layout"). A failed attempt does not count; it is retried every 2 minutes.
 bool _openedChartTabThisProcess = false;
+
+/// When this engine run first saw TradingView answering. A tab is never
+/// opened in the first 90 s (found 2026-11-14: right after a TradingView
+/// restart its restored tabs were still loading, looked missing, and an extra
+/// tab got opened - 3 chart tabs).
+DateTime? _firstSawTradingViewAt;
+const Duration _openTabGrace = Duration(seconds: 90);
 DateTime? _lastChartTabOpenFailAt;
 const Duration _chartTabRetryEvery = Duration(minutes: 2);
 
@@ -434,6 +441,7 @@ Future<CdpClient> _connectToOwnTab(
   String layoutName = 'Unnamed',
   bool Function()? beforeOpenTab,
   void Function()? afterOpenTab,
+  void Function(String message)? log,
 }) async {
   final targets = await _chartTargets(host, port);
   final clients = <CdpClient?>[];
@@ -459,13 +467,32 @@ Future<CdpClient> _connectToOwnTab(
     }
 
     final decision = decideOwnTab(tags, owner);
-    // Our tab is gone and none is free: open one on the saved layout, as
-    // tradingMT5 does - only when fewer than [maxChartTabs] are open.
+    _firstSawTradingViewAt ??= DateTime.now();
+    // Our tab is gone and none is free: open one on the saved layout - only
+    // when fewer than [maxChartTabs] TradingView tabs exist (counting tabs
+    // still loading, any tradingview.com page) and TradingView has been up
+    // for [_openTabGrace].
     final noFreeTab = decision.use == null &&
         decision.claimOrder.isEmpty &&
         !tags.contains(tabNoAnswer) &&
         !tags.contains(owner);
-    if (noFreeTab && targets.length < maxChartTabs) {
+    final tvTabs = [
+      for (final t in await _fetchJsonList(host, port))
+        if (t['type'] == 'page' && '${t['url']}'.contains('tradingview.com')) t,
+    ].length;
+    final settled =
+        DateTime.now().difference(_firstSawTradingViewAt!) >= _openTabGrace;
+    if (noFreeTab && tvTabs < maxChartTabs && !settled) {
+      log?.call(
+        'TV TAB: own tab missing - waiting for TradingView to settle '
+        '(${_openTabGrace.inSeconds}s after start) before opening one.',
+      );
+    }
+    if (noFreeTab && tvTabs < maxChartTabs && settled) {
+      log?.call(
+        'TV TAB: own tab missing, none free, $tvTabs TradingView tab(s) open - '
+        'opening one on "$layoutName" (New tab + layout card).',
+      );
       final layout = layoutName;
       // The TradingView sync lock (tv_sync.dart): never open a tab while the
       // other app is mid-action on TradingView.
@@ -478,6 +505,11 @@ Future<CdpClient> _connectToOwnTab(
       } finally {
         afterOpenTab?.call();
       }
+      log?.call(
+        opened == null
+            ? 'TV TAB: opening a tab did not work - retrying in 2 min.'
+            : 'TV TAB: new tab loaded - claiming it.',
+      );
       if (opened != null) {
         final client = await _openClient(opened);
         try {
@@ -574,6 +606,7 @@ Future<CdpClient> connectToChart(
   String layoutName = 'Unnamed',
   bool Function()? beforeOpenTab,
   void Function()? afterOpenTab,
+  void Function(String message)? log,
 }) async {
   const baseDelay = Duration(milliseconds: 500);
   Object? lastError;
@@ -586,6 +619,7 @@ Future<CdpClient> connectToChart(
         layoutName: layoutName,
         beforeOpenTab: beforeOpenTab,
         afterOpenTab: afterOpenTab,
+        log: log,
       );
     } catch (e) {
       lastError = e;

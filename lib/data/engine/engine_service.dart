@@ -5167,6 +5167,7 @@ class EngineService {
         layoutName: config.cdp.layoutName,
         beforeOpenTab: _lockForTabOpen,
         afterOpenTab: tvSync.releaseLock,
+        log: logger.log,
       );
       logger.log('CDP connected (${config.cdp.host}:${config.cdp.port})');
       final ready = await waitForChartApiReady(client);
@@ -5219,6 +5220,7 @@ class EngineService {
         layoutName: config.cdp.layoutName,
         beforeOpenTab: _lockForTabOpen,
         afterOpenTab: tvSync.releaseLock,
+        log: logger.log,
       );
         if (!tvSync.tryLock('reload_own_tab')) {
           client.close();
