@@ -21,11 +21,16 @@ class StopLossLockStateStore {
   /// and is retried until it is added.
   final Map<String, double> _owedByBotId = {};
 
+  /// When SL was last cleared for a top-up (per the user, 2026-11-15): the
+  /// $50 lock waits [sllLockPauseAfterTopUp] after this, then starts fresh.
+  final Map<String, DateTime> _topUpAtByBotId = {};
+
   void load() {
     final raw = _storage.readJsonObject(_storage.stopLossLockStateFile) ?? const {};
     _startedIds.clear();
     _lockedUsdByBotId.clear();
     _owedByBotId.clear();
+    _topUpAtByBotId.clear();
     raw.forEach((id, value) {
       if (value is! Map) return;
       if (value['started'] == true) _startedIds.add(id);
@@ -33,19 +38,38 @@ class StopLossLockStateStore {
       if (usd is num) _lockedUsdByBotId[id] = usd.toDouble();
       final owed = value['owed'];
       if (owed is num && owed > 0) _owedByBotId[id] = owed.toDouble();
+      final at = DateTime.tryParse('${value['topUpAt']}');
+      if (at != null) _topUpAtByBotId[id] = at;
     });
   }
 
   void _persist() {
-    final ids = {..._startedIds, ..._lockedUsdByBotId.keys, ..._owedByBotId.keys};
+    final ids = {
+      ..._startedIds,
+      ..._lockedUsdByBotId.keys,
+      ..._owedByBotId.keys,
+      ..._topUpAtByBotId.keys,
+    };
     _storage.writeJson(_storage.stopLossLockStateFile, {
       for (final id in ids)
         id: {
           'started': _startedIds.contains(id),
           if (_lockedUsdByBotId[id] != null) 'lockedUsd': _lockedUsdByBotId[id],
           if (_owedByBotId[id] != null) 'owed': _owedByBotId[id],
+          if (_topUpAtByBotId[id] != null)
+            'topUpAt': _topUpAtByBotId[id]!.toIso8601String(),
         },
     });
+  }
+
+  DateTime? lastTopUpAt(String buOrderId) => _topUpAtByBotId[buOrderId];
+
+  /// SL was cleared on Pionex for a top-up: the old lock is gone, and the
+  /// pause before a fresh lock restarts from [at].
+  void markSlClearedForTopUp(String buOrderId, DateTime at) {
+    _lockedUsdByBotId.remove(buOrderId);
+    _topUpAtByBotId[buOrderId] = at;
+    _persist();
   }
 
   double? owed(String buOrderId) => _owedByBotId[buOrderId];
@@ -83,7 +107,8 @@ class StopLossLockStateStore {
     final removed =
         _startedIds.remove(buOrderId) |
         (_lockedUsdByBotId.remove(buOrderId) != null) |
-        (_owedByBotId.remove(buOrderId) != null);
+        (_owedByBotId.remove(buOrderId) != null) |
+        (_topUpAtByBotId.remove(buOrderId) != null);
     if (removed) _persist();
   }
 }

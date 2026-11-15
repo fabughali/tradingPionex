@@ -6725,6 +6725,8 @@ class EngineService {
           quoteInvestment: owed,
         );
         stopLossLockState.setOwed(id, 0);
+        // This completes a top-up, so the 10-minute pause restarts from now.
+        stopLossLockState.markSlClearedForTopUp(id, DateTime.now());
         _sllPendingTopUp[id] = (
           expectedActual: (bot.actualInvestment ?? 0) + owed,
           at: DateTime.now(),
@@ -6775,6 +6777,13 @@ class EngineService {
     // 3. P&L >= $50: SL at P&L - $20 ($10 steps), only ever up. Set on
     //    Pionex as a $ trigger (`profit_amount`, the same type the gear
     //    menu's TP/SL editor uses for P&L in $), per the user.
+    //    After a top-up SL stays blank for 10 minutes from the last top-up,
+    //    then the lock starts from scratch (per the user, 2026-11-15).
+    final lastTopUp = stopLossLockState.lastTopUpAt(id);
+    if (lastTopUp != null &&
+        DateTime.now().difference(lastTopUp) < sllLockPauseAfterTopUp) {
+      return;
+    }
     final stored = stopLossLockState.lockedUsd(id);
     final fresh = sllLockUsd(profit);
     if (fresh == null || (stored != null && fresh <= stored)) return;
@@ -6817,6 +6826,27 @@ class EngineService {
       return;
     }
     final amount = maxAmount < x ? maxAmount : x;
+    // SL is always blank before a top-up (per the user, 2026-11-15). If
+    // Pionex refuses to clear it, no money is moved this pass.
+    try {
+      await pionex.updateTriggerProfitLoss(
+        buOrderId: id,
+        lossStopType: 'profit_amount',
+        lossStopValue: '',
+      );
+    } catch (e) {
+      logger.log(
+        'SLL ${bot.pairKey} ($id): could not set SL blank before the top-up ($e) '
+        '- no money moved, retrying next pass.',
+        level: 'ERROR',
+      );
+      return;
+    }
+    stopLossLockState.markSlClearedForTopUp(id, DateTime.now());
+    logger.log(
+      'SLL ${bot.pairKey} ($id): SL set blank before the top-up - the \$50 lock '
+      'restarts from scratch 10 min after the last top-up.',
+    );
     await pionex.reduceMargin(buOrderId: id, amount: amount);
     await Future<void>.delayed(const Duration(seconds: 3));
     try {

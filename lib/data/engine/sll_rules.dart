@@ -9,7 +9,12 @@
 ///   under $1, the whole extra margin is moved.
 /// - P&L >= $50: SL locks profit at P&L - $20 in $10 steps ($50 -> $30,
 ///   $60 -> $40, ...); it only ever moves up.
+/// - Before every top-up SL is set blank (2026-11-15, per the user). The $50
+///   lock then waits [sllLockPauseAfterTopUp] after the last top-up and
+///   starts from scratch, ignoring any earlier lock.
 library;
+
+const Duration sllLockPauseAfterTopUp = Duration(minutes: 10);
 
 /// How much to move from extra margin into the investment, or 0 for none.
 double sllTopUpAmount({
