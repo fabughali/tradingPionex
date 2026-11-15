@@ -5102,6 +5102,54 @@ class EngineService {
   /// any successful connect.
   bool _ownTabReloadTried = false;
 
+  /// Failed chart loads (symbol switch refused, e.g. "series still loading")
+  /// in a row, across all pairs. Found 2026-11-15: the tab's data feed was
+  /// stuck for 8 hours - every switch failed, but connecting kept succeeding,
+  /// which reset [_consecutiveConnectFailuresWhileCdpUp], so the own-tab
+  /// reload never ran and no hybrid decision was read for any pair.
+  int _consecutiveChartSwitchFailures = 0;
+
+  /// Same rule as the connect watchdog: [_forceRelaunchTradingViewThreshold]
+  /// failed chart loads in a row -> reload this app's own tab (holding the
+  /// `reload_own_tab` sync lock). A successful load resets the count.
+  Future<void> _noteChartSwitch(bool ok) async {
+    if (ok) {
+      _consecutiveChartSwitchFailures = 0;
+      return;
+    }
+    _consecutiveChartSwitchFailures++;
+    if (_consecutiveChartSwitchFailures < _forceRelaunchTradingViewThreshold) {
+      return;
+    }
+    final cdp = _cdp;
+    if (cdp == null) return;
+    if (!tvSync.tryLock('reload_own_tab')) {
+      logger.log(
+        'TV SYNC: tradingMT5 holds the TradingView lock - not reloading this '
+        'app\'s tab now; trying again on the next failed chart load.',
+      );
+      return;
+    }
+    _consecutiveChartSwitchFailures = 0;
+    try {
+      await reloadOwnTab(cdp);
+      final ready = await waitForChartApiReady(cdp);
+      logger.log(
+        'TRADINGVIEW WATCHDOG: chart failed to load $_forceRelaunchTradingViewThreshold '
+        'times in a row - reloaded this app\'s own tab only (chart ready: $ready).',
+        level: 'CRITICAL',
+      );
+    } catch (e) {
+      logger.log(
+        'TRADINGVIEW WATCHDOG: could not reload this app\'s own tab after failed '
+        'chart loads: $e',
+        level: 'CRITICAL',
+      );
+    } finally {
+      tvSync.releaseLock();
+    }
+  }
+
   /// TradingView sync with tradingMT5 (tv_sync.dart, per the user
   /// 2026-11-13): heartbeat, the shared lock, and restart requests.
   final TvSync tvSync = TvSync(app: TvSync.pionex);
@@ -5451,8 +5499,10 @@ class EngineService {
         'different symbol.',
         level: 'ERROR',
       );
+      await _noteChartSwitch(false);
       return null;
     }
+    await _noteChartSwitch(true);
     await setChartStyle(_cdp!, chartStyleHeikinAshi);
 
     const waitLadderSec = [30, 20, 10, 5, 5];
@@ -9292,8 +9342,10 @@ class EngineService {
       logger.log(
         'CHART SWITCH FAILED to $symbol $resolution: ${switched.error ?? 'timeout'}',
       );
+      await _noteChartSwitch(false);
       return null;
     }
+    await _noteChartSwitch(true);
     // Bug fixed 2026-09-16, per the user ("tried with eth and with btc
     // clicked thunder icon... still not ok"): setChartView only waits for
     // the chart to confirm the new symbol/resolution - it says nothing
