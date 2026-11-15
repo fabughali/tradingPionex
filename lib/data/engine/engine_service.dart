@@ -6810,6 +6810,29 @@ class EngineService {
     );
   }
 
+  /// This bot's actual investment + extra margin as Pionex reports it right
+  /// now, falling back to the last refreshed copy [known], or null if Pionex
+  /// shows neither.
+  Future<double?> _livePionexTotalInvestment(String id, GridBot? known) async {
+    double? totalOf(GridBot b) =>
+        (b.actualInvestment != null && b.extraMargin != null)
+        ? b.actualInvestment! + b.extraMargin!
+        : null;
+    try {
+      for (final raw in await pionex.getActiveGrids()) {
+        final rawId =
+            (raw['buOrderId'] ?? (raw['buOrderData'] as Map?)?['buOrderId'])
+                ?.toString();
+        if (rawId != id) continue;
+        final total = totalOf(GridBot.fromPionexOrder(raw, appInitiated: true));
+        if (total != null) return total;
+      }
+    } catch (e) {
+      logger.log('RECYCLE: could not read Pionex\'s live investment for $id: $e');
+    }
+    return known == null ? null : totalOf(known);
+  }
+
   /// Moves [x] USDT from this bot's extra margin into its investment:
   /// reduceMargin (to free balance), then invest_in. If the invest step
   /// fails, the money is put back as margin.
@@ -7562,6 +7585,10 @@ class EngineService {
           });
           _openEntryByPair.remove(entryKey);
         } else {
+          // Pionex's own actual + extra margin, read just before the close
+          // (per the user, 2026-11-15): the user may have taken margin out on
+          // Pionex by hand, so the app's open-time figure is not the fact.
+          final liveTotal = await _livePionexTotalInvestment(entryId, existing);
           try {
             await pionex.cancelFuturesGrid(buOrderId: entryId);
             createdBots.forgetBot(entryId);
@@ -7582,7 +7609,14 @@ class EngineService {
             }
             _activeGridsById.remove(entryId);
             risk.closePosition(symbol, category);
-            final oldInvestment = entry.investment;
+            final oldInvestment = liveTotal ?? entry.investment;
+            if (liveTotal != null &&
+                (liveTotal - entry.investment).abs() >= 0.01) {
+              logger.log(
+                'RECYCLE $symbol: Pionex shows actual+extra=$liveTotal, app had '
+                '${entry.investment} - using Pionex\'s figure.',
+              );
+            }
             double? recycled;
             double? pnl;
             try {
