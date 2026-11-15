@@ -5921,6 +5921,19 @@ class EngineService {
       );
       return false;
     }
+    // Hybrid rule, same as the live check's `confirmedEvent.time >
+    // entry.entryTime`: only a signal printed after this trade opened can
+    // close it. Added 2026-11-15, per the user, after a partial chart read at
+    // startup closed a running AVAX short on a buy signal older than the
+    // short itself.
+    if (trueStart.time <= entry.entryTime) {
+      logger.log(
+        'WORM10 AUDIT $entryKey ($id): replay landed on $verdict, which is not '
+        'newer than this trade (entered t=${entry.entryTime}) - not closing.',
+        level: 'WARNING',
+      );
+      return false;
+    }
     final paused = storage.fileExists(storage.pauseFile);
     if (paused) {
       // Auto off means no new closes. Re-audit once it's back on.
