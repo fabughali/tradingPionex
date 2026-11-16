@@ -8594,8 +8594,12 @@ class EngineService {
     // call.
     if (existing != null) {
       _lastCreateSkipReason = 'a grid is already running for this pair/interval';
+      // Per the user (2026-11-16): this is the normal end of a running
+      // pair's check (its Next Trade preview is refreshed above), not an
+      // open attempt - logged as INFO, not ERROR.
       logger.log(
-        'ALREADY RUNNING: $symbol[${category.label}] - refusing to open a duplicate grid (preview above still shown for the report).',
+        'PREVIEW ONLY $symbol[${category.label}]: its bot is running - Next Trade numbers refreshed, nothing opened.',
+        level: 'INFO',
       );
       return;
     }
