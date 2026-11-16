@@ -51,6 +51,8 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
 
   /// The Auto cards' sort, chosen by the icon next to the count.
   CardSort _autoSort = CardSort.aToZ;
+  // Manual bots keep their own sort (per the user, 2026-11-16).
+  CardSort _manualSort = CardSort.aToZ;
 
   /// App open == Power on (per the user, 2026-11-13 - e.g. after a Windows
   /// restart, when the app starts with Windows). Waits for the launch-time
@@ -888,9 +890,9 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                               style: Theme.of(context).textTheme.titleMedium,
                             ),
                             cardSortIconButton(
-                              _autoSort,
+                              _manualSort,
                               () => setState(
-                                () => _autoSort = nextCardSort(_autoSort),
+                                () => _manualSort = nextCardSort(_manualSort),
                               ),
                             ),
                           ],
@@ -899,7 +901,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                         GridsTable(
                           grids: status.grids.manualRunning,
                           asCards: true,
-                          cardSort: _autoSort,
+                          cardSort: _manualSort,
                           busy: _actionsBlocked(status, engineProcessAlive),
                           emptyMessage: 'No running manual bots right now.',
                           entrySignalFor: (id) => repo.entrySignalFor(id),
