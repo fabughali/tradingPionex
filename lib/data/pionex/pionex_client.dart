@@ -76,6 +76,22 @@ class PionexClient {
     }
   }
 
+  /// When Pionex last refused the API key itself (expired, bad signature,
+  /// IP not allowed, no permission - 2026-11-16, per the user). That is an
+  /// account problem, not the pair's, so the waiting engine must not count
+  /// it as a failed-open strike.
+  DateTime? lastKeyErrorAt;
+
+  static bool isKeyErrorText(String text) {
+    final t = text.toLowerCase();
+    return t.contains('apikey') ||
+        t.contains('api key') ||
+        t.contains('signature') ||
+        t.contains('ip_not') ||
+        t.contains('whitelist') ||
+        t.contains('permission');
+  }
+
   void _recordSuccess() {
     _consecutiveRateLimitHits = 0;
     _bannedUntil = null;
@@ -196,6 +212,7 @@ class PionexClient {
         _recordRateLimitHit();
         throw RateLimitException(null);
       }
+      if (isKeyErrorText(message)) lastKeyErrorAt = DateTime.now();
       throw ApiException(
         'Pionex API error: ${data['code'] ?? ''} ${data['message'] ?? ''}',
         statusCode: capturedStatus,

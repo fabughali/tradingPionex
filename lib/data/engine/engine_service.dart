@@ -2748,6 +2748,8 @@ class EngineService {
           );
           continue;
         }
+        final attemptStartedAt = DateTime.now();
+        var keyRefused = false;
         try {
           await _manageGridPair(
             GridPairConfig(
@@ -2760,9 +2762,16 @@ class EngineService {
             category: cat,
           );
         } catch (e) {
+          if (PionexClient.isKeyErrorText('$e')) keyRefused = true;
           logger.log(
             'autoCheckup[${category.label}] waiting engine[${cat.label}] manageGridPair($symbol) error: $e',
           );
+        }
+        // Per the user (2026-11-16): an expired / refused API key is an
+        // account problem, not this pair's - it never counts as a strike.
+        final lastKeyError = pionex.lastKeyErrorAt;
+        if (lastKeyError != null && !lastKeyError.isBefore(attemptStartedAt)) {
+          keyRefused = true;
         }
         // Per the user (2026-09-12): "if the waiting pair failed to
         // start after 5 waiting cycles, app will terminate this auto
@@ -2788,6 +2797,13 @@ class EngineService {
           if (_waitingEngineFailCount.remove(triedKey) != null) {
             _saveWaitingStrikes();
           }
+        } else if (keyRefused) {
+          logger.log(
+            'autoCheckup[${category.label}] waiting engine[${cat.label}]: '
+            '$symbol did not open because Pionex refused the API key - '
+            'not counted as a strike. Renew the API key on Pionex.',
+            level: 'ERROR',
+          );
         } else if (_lastCreateSkipReason == null) {
           final fails = (_waitingEngineFailCount[triedKey] ?? 0) + 1;
           if (fails >= _waitingEngineMaxFailuresBeforeTerminate) {
