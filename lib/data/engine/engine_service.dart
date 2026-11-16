@@ -6018,7 +6018,35 @@ class EngineService {
       // bookkeeping, so a never-recorded one needn't wait out the candle gate;
       // correcting an existing one does.
       final neverRecorded = entry.openEventType == null;
-      if (entry.openedBy(trueStart) ||
+      // The card's Open line (per the user, 2026-11-16): a bot the app did
+      // not open itself - e.g. switched from manual - has no entry-signal
+      // record, so it takes the open signal this check found.
+      void fillCardOpen({bool replace = false}) {
+        final have = entrySignalStore.recordFor(id);
+        final at = DateTime.fromMillisecondsSinceEpoch(trueStart.time * 1000);
+        if (have != null &&
+            (!replace ||
+                (have.open.type == trueStart.kind.name && have.open.at == at))) {
+          return;
+        }
+        entrySignalStore.recordOpen(
+          id,
+          base: base,
+          direction: runningDirection.wireValue,
+          at: at,
+          type: trueStart.kind.name,
+          zone: null,
+          value: null,
+        );
+        logger.log(
+          'WORM10 AUDIT $entryKey ($id): card Open set to $verdict.',
+        );
+      }
+      if (entry.openedBy(trueStart)) {
+        fillCardOpen();
+        return false;
+      }
+      if (
           (!neverRecorded &&
               !worm10WaitIsOver(
                 trueStart.time,
@@ -6043,6 +6071,7 @@ class EngineService {
         'WORM10 AUDIT $entryKey ($id): ${neverRecorded ? 'recorded' : 'corrected'} '
         'the opening event as $verdict.',
       );
+      fillCardOpen(replace: !neverRecorded);
       return false;
     }
 
