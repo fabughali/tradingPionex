@@ -3566,6 +3566,18 @@ class EngineService {
     // consumes pairActionFile when it's genuinely a 'reprice' request -
     // anything else falls through to the normal gated dispatch below,
     // completely unaffected.
+    // Auto <-> Manual switches from the More menu (2026-11-16) are
+    // chart-free too, and must run in the engine: it owns the auto-bot
+    // list in memory and would otherwise undo a GUI-side change.
+    {
+      final peek = storage.readJsonObject(storage.pairActionFile);
+      final action = '${peek?['action']}';
+      if (peek != null && (action == 'to-auto' || action == 'to-manual')) {
+        storage.deleteFileIfExists(storage.pairActionFile);
+        await _handleBotSwitchRequest(peek);
+        return;
+      }
+    }
     if (!_repriceRunning) {
       final peek = storage.readJsonObject(storage.pairActionFile);
       if (peek != null && '${peek['action']}' == 'reprice') {
@@ -4113,6 +4125,114 @@ class EngineService {
   /// dispatched from [_onPairActionTick]'s chart-free early branch, never
   /// through the normal gated `_processPairAction` switch, since it needs
   /// none of that machinery (no chart, no pause/resume, no preemption).
+  /// Switches one running bot between Auto and Manual (2026-11-16, per the
+  /// user, from the card's More menu). Auto is 1H only.
+  ///
+  /// - to-manual: the bot keeps running on Pionex untouched; the engine
+  ///   stops managing it (no hybrid close, no SLL, no recycle) and the pair
+  ///   leaves the 1H auto list, so the Waiting engine never opens a second
+  ///   bot beside it.
+  /// - to-auto: the bot joins the 1H auto list, any Last mark is cleared,
+  ///   and a 1H checkup runs now with this pair's first check immediate - the
+  ///   same reverse check Power on does. An opposite signal newer than the
+  ///   bot closes and flips it by the hybrid decision.
+  Future<void> _handleBotSwitchRequest(Map<String, dynamic> req) async {
+    final id = '${req['id']}';
+    final action = '${req['action']}';
+    final buOrderId = '${req['buOrderId']}';
+    Map<String, dynamic> result;
+    try {
+      result = await _switchBot(action, buOrderId);
+    } catch (e) {
+      result = {'ok': false, 'message': 'Error: $e'};
+    }
+    storage.writeJson(storage.pairActionResultFile, {
+      'id': id,
+      'action': action,
+      'buOrderId': buOrderId,
+      'completedAtMs': DateTime.now().millisecondsSinceEpoch,
+      ...result,
+    });
+    logger.log(
+      'PAIR ACTION [$id]: $action $buOrderId -> ok=${result['ok']} ${result['message']}',
+    );
+  }
+
+  Future<Map<String, dynamic>> _switchBot(String action, String id) async {
+    const category = AutoCategory.oneHour;
+    Map<String, dynamic>? raw;
+    for (final o in await pionex.getActiveGrids()) {
+      final oid = (o['buOrderId'] ?? (o['buOrderData'] as Map?)?['buOrderId'])
+          ?.toString();
+      if (oid == id) {
+        raw = o;
+        break;
+      }
+    }
+    if (raw == null) {
+      return {'ok': false, 'message': 'This bot is not running on Pionex.'};
+    }
+    final isAuto = createdBots.isAppInitiated(id);
+    final bot = GridBot.fromPionexOrder(raw, appInitiated: isAuto);
+    final base = bot.base
+        .toUpperCase()
+        .replaceAll(RegExp(r'\.PERP$', caseSensitive: false), '');
+    final entryKey = '${_gridKey(base)}|${category.wireValue}';
+    if (action == 'to-manual') {
+      if (!isAuto) {
+        return {'ok': false, 'message': '${bot.pairKey} is already manual.'};
+      }
+      final botCategory = botCategories.categoryOf(id) ?? category;
+      createdBots.forgetBot(id);
+      botCategories.forget(id);
+      autoManagedByCategory[botCategory]?.removeBase(base);
+      final entry = _openEntryByPair['${_gridKey(base)}|${botCategory.wireValue}'];
+      if (entry?.buOrderId == id) {
+        _openEntryByPair.remove('${_gridKey(base)}|${botCategory.wireValue}');
+      }
+      stopLossLockState.forget(id);
+      _sllPendingTopUp.remove(id);
+      _activeGridsById[id] = bot.copyWith(appInitiated: false);
+      logger.log(
+        'SWITCH ${bot.pairKey} ($id): Auto -> Manual. Still running on Pionex; '
+        'the app no longer closes, recycles or runs SLL on it, and '
+        '$base is off the ${botCategory.label} auto list.',
+      );
+      return {'ok': true, 'pairKey': bot.pairKey, 'message': '${bot.pairKey} is now manual.'};
+    }
+    if (isAuto) {
+      return {'ok': false, 'message': '${bot.pairKey} is already auto.'};
+    }
+    if (_appGridForKey(_gridKey(base), category) != null) {
+      return {
+        'ok': false,
+        'message': '${bot.pairKey} already has an auto bot on 1H - only one per pair.',
+      };
+    }
+    createdBots.rememberBot(id);
+    botCategories.setCategory(id, category);
+    autoManagedByCategory[category]!.addBase(base);
+    retired.removeRetiredBases([(base: base, category: category)]);
+    // A stale entry from an earlier bot on this pair must not stand in for
+    // this one; adoption then records this bot's own start time.
+    if (_openEntryByPair[entryKey]?.buOrderId != id) {
+      _openEntryByPair.remove(entryKey);
+    }
+    _activeGridsById[id] = bot.copyWith(appInitiated: true);
+    // Reverse check: this pair's next read is the immediate one.
+    _worm10StartupChecked.remove(entryKey);
+    storage.touchFile(storage.autoCheckNowFileFor(category));
+    logger.log(
+      'SWITCH ${bot.pairKey} ($id): Manual -> Auto (1H). Reverse-checking it now - '
+      'an opposite signal newer than the bot closes and flips it.',
+    );
+    return {
+      'ok': true,
+      'pairKey': bot.pairKey,
+      'message': '${bot.pairKey} is now auto (1H) - reverse check running.',
+    };
+  }
+
   Future<void> _handleRepriceRequest(Map<String, dynamic> req) async {
     final id = '${req['id']}';
     final symbol = '${req['symbol']}'.trim().toUpperCase();
@@ -6634,6 +6754,7 @@ class EngineService {
     _sllRunning = true;
     try {
       final orders = await pionex.getActiveGrids();
+      final manualTpSl = _manualTpSlIds();
       for (final raw in orders) {
         final id =
             (raw['buOrderId'] ?? (raw['buOrderData'] as Map?)?['buOrderId'])
@@ -6643,7 +6764,7 @@ class EngineService {
         if (bot.isManuallyInterrupted) continue;
         _ensureOnAutoList(bot);
         try {
-          await _sllCheck(bot);
+          await _sllCheck(bot, manualTpSl: manualTpSl.contains(id));
         } catch (e) {
           logger.log(
             'SLL ${bot.pairKey} (${bot.buOrderId}) failed: $e',
@@ -6689,16 +6810,45 @@ class EngineService {
   final Map<String, ({double expectedActual, DateTime at})> _sllPendingTopUp =
       {};
 
-  Future<void> _sllCheck(GridBot bot) async {
+  /// buOrderIds whose TP/SL the user set by hand (see
+  /// [CoreStorage.manualTpSlFile]). Read fresh every pass - the GUI writes it.
+  Set<String> _manualTpSlIds() {
+    try {
+      return _manualTpSlLastGood = storage
+          .readJsonArrayStrict(storage.manualTpSlFile)
+          .map((e) => '$e')
+          .toSet();
+    } catch (_) {
+      // Caught mid-write: keep the last good list rather than turning SLL
+      // back on for a manual bot.
+      return _manualTpSlLastGood;
+    }
+  }
+
+  Set<String> _manualTpSlLastGood = const {};
+
+  final Set<String> _manualTpSlLogged = {};
+
+  Future<void> _sllCheck(GridBot bot, {bool manualTpSl = false}) async {
     final id = bot.buOrderId;
     final bareBase = bot.base
         .toUpperCase()
         .replaceAll(RegExp(r'\.PERP$', caseSensitive: false), '');
+    if (manualTpSl) {
+      if (_manualTpSlLogged.add(id)) {
+        logger.log(
+          'SLL ${bot.pairKey} ($id): off - the user set TP/SL by hand. A booked '
+          'top-up is still finished; nothing else is changed.',
+        );
+      }
+    } else {
+      _manualTpSlLogged.remove(id);
+    }
 
     // 1. Start of the trade, once per bot (per the user, 2026-11-09): TP at
     //    the range top for a long / bottom for a short, then never touched;
     //    SL blank until the $50 lock. An SL that SLL already locked is kept.
-    if (!stopLossLockState.started(id)) {
+    if (!manualTpSl && !stopLossLockState.started(id)) {
       final tp = switch (bot.trend) {
         GridDirection.long => bot.top,
         GridDirection.short => bot.bottom,
@@ -6765,6 +6915,8 @@ class EngineService {
       }
       return;
     }
+    // Manual TP/SL (2026-11-16, per the user): no top-up, no $50 lock.
+    if (manualTpSl) return;
 
     final live = bot.copyWith(currentPrice: price);
     final profit = live.profitAmount;

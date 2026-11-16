@@ -16,7 +16,6 @@ import '../../l10n/app_localizations.dart';
 import '../../utilities/util_date.dart';
 import '../../utilities/util_string.dart';
 import '../../widgets/power_off_confirm.dart';
-import '../../widgets/category_knob.dart';
 import '../../widgets/grids_table.dart';
 import '../../widgets/pnl_summary_view.dart';
 import '../../widgets/waiting_bases_view.dart';
@@ -779,11 +778,13 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                         successMessage:
                             'Retired ${bots.length} bot(s) — will finish naturally and never auto-recreate.',
                       ),
+                      manualTpSlIds: repo.manualTpSlIds(),
                       onBulkConvertToManual: (bots) => _run(
                         'convert-to-manual-selected',
                         () async {
                           for (final bot in bots) {
-                            await repo.convertAutoToManual(bot.buOrderId);
+                            final r = await repo.convertAutoToManual(bot.buOrderId);
+                            if (r['ok'] != true) throw Exception('${r['message']}');
                           }
                           ref.invalidate(statusReportProvider);
                         },
@@ -875,38 +876,56 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                     ),
                   ),
                   ReuseCard(
-                    title: 'Manual bots: ${status.grids.manualRunning.length}',
-                    child: GridsTable(
-                      grids: status.grids.manualRunning,
-                      // Same cards as the Auto bots (per the user, 2026-11-14).
-                      asCards: true,
-                      // See the matching fix/comment on the app-bots
-                      // GridsTable above - same bug, same fix.
-                      busy: _actionsBlocked(status, engineProcessAlive),
-                      emptyMessage: 'No running manual bots right now.',
-                      entrySignalFor: (id) => repo.entrySignalFor(id),
-                      closeCandidateFor: repo.closeCandidateFor,
-                      onBulkConvertToAuto: (bots) async {
-                        final category = await showCategoryPickerDialog(
-                          context,
-                          title: 'Convert ${bots.length} bot(s) to auto',
-                        );
-                        if (category == null || !context.mounted) return;
-                        await _run(
-                          'convert-selected',
-                          () async {
-                            for (final bot in bots) {
-                              await repo.convertManualToAuto(
-                                bot.buOrderId,
-                                category,
-                              );
-                            }
-                            ref.invalidate(statusReportProvider);
-                          },
-                          successMessage:
-                              'Converted ${bots.length} bot(s) to auto (${category.label}) — the engine will check them up from here on.',
-                        );
-                      },
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        // Same header, sort icon and sort as Auto bots (per
+                        // the user, 2026-11-16).
+                        Row(
+                          children: [
+                            Text(
+                              'Manual bots: ${status.grids.manualRunning.length}',
+                              style: Theme.of(context).textTheme.titleMedium,
+                            ),
+                            cardSortIconButton(
+                              _autoSort,
+                              () => setState(
+                                () => _autoSort = nextCardSort(_autoSort),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const Divider(height: CoreSpacing.md),
+                        GridsTable(
+                          grids: status.grids.manualRunning,
+                          asCards: true,
+                          cardSort: _autoSort,
+                          busy: _actionsBlocked(status, engineProcessAlive),
+                          emptyMessage: 'No running manual bots right now.',
+                          entrySignalFor: (id) => repo.entrySignalFor(id),
+                          closeCandidateFor: repo.closeCandidateFor,
+                          favoriteIds: repo.favoriteBotIds(),
+                          manualTpSlIds: repo.manualTpSlIds(),
+                          // Auto is 1H only (per the user, 2026-11-16) - no
+                          // timeframe to pick; the engine reverse-checks it.
+                          onBulkConvertToAuto: (bots) => _run(
+                            'convert-selected',
+                            () async {
+                              for (final bot in bots) {
+                                final r = await repo.convertManualToAuto(
+                                  bot.buOrderId,
+                                );
+                                if (r['ok'] != true) {
+                                  throw Exception('${r['message']}');
+                                }
+                              }
+                              ref.invalidate(statusReportProvider);
+                            },
+                            successMessage:
+                                'Converted ${bots.length} bot(s) to auto (1H) - reverse check running.',
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                   ReuseCard(

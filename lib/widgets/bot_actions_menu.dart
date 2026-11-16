@@ -5,6 +5,7 @@ import '../data/models/grid_bot.dart';
 import 'bot_add_investment_sheet.dart';
 import 'bot_margin_sheet.dart';
 import 'bot_stop_sheet.dart';
+import 'bot_tp_sl_sheet.dart';
 
 /// Gear-icon "More" menu (2026-09-18, per the user: "for auto bots and
 /// manual bots, i want you to add gear icon per each pair, once it is
@@ -77,6 +78,11 @@ class _BotActionsMenu extends StatelessWidget {
         icon: Icons.add_circle_outline,
         label: 'Add investment',
         onTap: (ctx) => showAddInvestmentSheet(ctx, bot: bot),
+      ),
+      _MenuItem(
+        icon: Icons.track_changes,
+        label: 'TP / SL',
+        onTap: (ctx) => showTpSlSheet(ctx, bot: bot),
       ),
       _MenuItem(
         icon: Icons.power_settings_new,

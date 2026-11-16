@@ -933,83 +933,89 @@ class EngineControlRepository {
     };
   }
 
-  /// Converts a currently-running MANUAL grid into an app-tracked ("auto")
-  /// one: from its next checkup onward, the engine treats it exactly like a
-  /// bot it created itself - it moves into the Auto Bots report, and
-  /// becomes eligible for the opposite-signal auto-close. The bot itself is
-  /// never touched on Pionex; this only changes which list the app
-  /// considers it in. Refuses anything not verified as a currently-running
-  /// manual bot right now (Pionex is the source of truth, same as every
-  /// other action here).
-  Future<Map<String, dynamic>> convertManualToAuto(
-    String buOrderId,
-    AutoCategory category,
-  ) async {
-    await refreshSync();
-    final grids = await _splitGrids();
-    final bot = grids.manualRunning.cast<GridBot?>().firstWhere(
-      (g) => g?.buOrderId == buOrderId,
-      orElse: () => null,
-    );
-    if (bot == null) {
-      return {'ok': false, 'reason': 'not-a-running-manual-bot'};
+  /// Manual -> Auto (2026-11-16, per the user: from the card's More menu,
+  /// 1H only, then a reverse check). Done by the engine, which owns the
+  /// auto-bot list in memory - a GUI-side edit used to be undone by it.
+  Future<Map<String, dynamic>> convertManualToAuto(String buOrderId) =>
+      _requestBotSwitch('to-auto', buOrderId);
+
+  /// Auto -> Manual: the bot keeps running on Pionex untouched; the app
+  /// stops managing it and the pair leaves the auto list.
+  Future<Map<String, dynamic>> convertAutoToManual(String buOrderId) =>
+      _requestBotSwitch('to-manual', buOrderId);
+
+  Future<Map<String, dynamic>> _requestBotSwitch(
+    String action,
+    String buOrderId, {
+    Duration timeout = const Duration(seconds: 30),
+  }) async {
+    final id = DateTime.now().microsecondsSinceEpoch.toString();
+    _storage.writeJson(_storage.pairActionFile, {
+      'id': id,
+      'action': action,
+      'buOrderId': buOrderId,
+    });
+    _log('SWITCH requested: $action $buOrderId (id=$id).');
+    final deadline = DateTime.now().add(timeout);
+    while (DateTime.now().isBefore(deadline)) {
+      await Future<void>.delayed(const Duration(milliseconds: 400));
+      final result = _storage.readJsonObject(_storage.pairActionResultFile);
+      if (result != null && '${result['id']}' == id) {
+        createdBots.load();
+        botCategories.load();
+        return result;
+      }
     }
-    createdBots.load();
-    createdBots.rememberBot(buOrderId);
-    botCategories.setCategory(buOrderId, category);
-    // Bug fixed 2026-09-10 (same audit as _stopOne's matching fix above):
-    // `bot.base` is Pionex's raw futures base ("GALA.PERP"), but
-    // autoManagedByCategory/retired both store bare names ("GALA") - both
-    // calls below silently never matched the real base, so a bot converted
-    // from manual to auto never actually became eligible for auto-checkup
-    // (wrong key on the managed list) and never cleared a real stale "Last"
-    // mark either.
-    final bareBase = bot.base.replaceAll(
-      RegExp(r'\.PERP$', caseSensitive: false),
-      '',
-    );
-    autoManagedByCategory[category]!.addBase(bareBase);
-    // Clears any stale "Last" mark from a previous life as an auto bot -
-    // converting it back in is an explicit re-enable, it should never stay
-    // silently blocked from ever reopening.
-    retired.removeRetiredBases([(base: bareBase, category: category)]);
-    _log(
-      'Converted manual bot ${bot.pairKey} ($buOrderId) to an auto bot '
-      '(${category.label}) - triggering an immediate Auto[${category.label}] '
-      'checkup (that category\'s auto-managed bases only, never the full '
-      'Red list). If its current signal is already opposite its own '
-      'direction, it will be closed and reopened fresh on the very next '
-      'check.',
-    );
-    // Per the user (2026-09-05/06): this base is now that category's
-    // responsibility, so converting it triggers that category's OWN track -
-    // never checkNow() (the full Red-list Checkup), which would scan every
-    // other pair too.
-    triggerAutoCheckupFor(category);
-    return {'ok': true, 'pairKey': bot.pairKey};
+    return {
+      'ok': false,
+      'message': 'The engine did not answer - is Power on? Nothing was changed.',
+    };
   }
 
-  /// The reverse of [convertManualToAuto]: removes this bot from the app's
-  /// own tracking, so it moves to the Manual bots table and Auto stops
-  /// watching it for opposite-signal close. The bot itself is never touched
-  /// on Pionex - this only changes which list the app considers it in.
-  /// Refuses anything not verified as a currently-running app-initiated bot
-  /// right now.
-  Future<Map<String, dynamic>> convertAutoToManual(String buOrderId) async {
-    await refreshSync();
-    final grids = await _splitGrids();
-    final bot = grids.appRunning.cast<GridBot?>().firstWhere(
-      (g) => g?.buOrderId == buOrderId,
-      orElse: () => null,
-    );
-    if (bot == null) {
-      return {'ok': false, 'reason': 'not-a-running-auto-bot'};
+  /// buOrderIds whose TP/SL the user set by hand (SLL off for them) - see
+  /// [CoreStorage.manualTpSlFile].
+  Set<String> manualTpSlIds() {
+    try {
+      return _storage
+          .readJsonArrayStrict(_storage.manualTpSlFile)
+          .map((e) => '$e')
+          .toSet();
+    } catch (_) {
+      return {};
     }
-    createdBots.load();
-    createdBots.forgetBot(buOrderId);
-    botCategories.forget(buOrderId);
-    _log('Converted auto bot ${bot.pairKey} ($buOrderId) to manual.');
-    return {'ok': true, 'pairKey': bot.pairKey};
+  }
+
+  /// Manual TP/SL from the More menu (2026-11-16, per the user). [stopType]
+  /// is Pionex's: 'profit_ratio' (0.2 = 20%), 'profit_amount' (USDT) or
+  /// 'price'. A null value sets that side blank. Setting either side turns
+  /// SLL off for this bot; setting both blank hands it back to SLL.
+  Future<void> setManualTpSl({
+    required GridBot bot,
+    required String stopType,
+    String? takeProfit,
+    String? stopLoss,
+  }) async {
+    await _pionex.updateTriggerProfitLoss(
+      buOrderId: bot.buOrderId,
+      profitStopType: stopType,
+      profitStopValue: takeProfit ?? '',
+      lossStopType: stopType,
+      lossStopValue: stopLoss ?? '',
+    );
+    final manual = takeProfit != null || stopLoss != null;
+    final running = (await _runningGrids()).map((g) => g.buOrderId).toSet();
+    final ids = manualTpSlIds()..removeWhere((id) => !running.contains(id));
+    if (manual) {
+      ids.add(bot.buOrderId);
+    } else {
+      ids.remove(bot.buOrderId);
+    }
+    _storage.writeJson(_storage.manualTpSlFile, ids.toList()..sort());
+    _log(
+      'Manual TP/SL ${bot.pairKey} (${bot.buOrderId}): TP=${takeProfit ?? 'blank'}, '
+      'SL=${stopLoss ?? 'blank'} ($stopType) - '
+      '${manual ? 'SLL off for this trade' : 'both blank, SLL back on'}.',
+    );
   }
 
   /// Cancel a specific app-initiated running bot. Refuses anything not

@@ -7,244 +7,189 @@ import '../data/providers/app_providers.dart';
 import '../utilities/util_string.dart';
 import 'reuse_button.dart';
 
-enum _TpSlInputMode { price, pnl, pnlPercent }
+enum TpSlMode { pnlPercent, pnlUsd, price }
 
-/// Take Profit / Stop Loss sheet (2026-09-18, per the user's own detailed
-/// spec, matched against Pionex's real screens): 3 input modes (Price/
-/// PnL/PnL%), sign-convention validation that mirrors Pionex's own app
-/// (confirmed live the API itself does NOT enforce this - every value
-/// tried was accepted - so it's replicated here client-side to match the
-/// UX the user described and is used to). Shared between Take Profit and
-/// Stop Loss since the two screens are structurally identical - only the
-/// sign rules and field names differ.
-Future<void> showTpSlSheet(
-  BuildContext context, {
-  required GridBot bot,
-  required bool isTakeProfit,
-}) {
+/// Manual TP/SL (2026-11-16, per the user): set from the card's More menu,
+/// in one of three ways. Setting either side turns SLL off for this trade;
+/// clearing both hands it back to SLL.
+Future<void> showTpSlSheet(BuildContext context, {required GridBot bot}) {
   return showModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
     backgroundColor: Colors.transparent,
-    builder: (context) => _TpSlSheet(bot: bot, isTakeProfit: isTakeProfit),
+    builder: (context) => _TpSlSheet(bot: bot),
   );
 }
 
+/// The user's rules, checked against the bot's live figures. Returns an
+/// error message, or null when [value] is allowed.
+///
+/// - P&L %: TP above the current P&L %, SL below it (either may be negative).
+/// - P&L $: TP above the current P&L $, SL below it.
+/// - Price: long - TP above the current price, SL below; short - opposite.
+String? validateTpSl({
+  required TpSlMode mode,
+  required bool isTakeProfit,
+  required double value,
+  required bool long,
+  double? currentPnlPercent,
+  double? currentPnlUsd,
+  double? currentPrice,
+}) {
+  final side = isTakeProfit ? 'TP' : 'SL';
+  switch (mode) {
+    case TpSlMode.pnlPercent:
+      final now = currentPnlPercent;
+      if (now == null) return 'Current P&L % is not known yet.';
+      if (isTakeProfit && value <= now) {
+        return '$side must be more than the current P&L (${now.toStringAsFixed(2)}%).';
+      }
+      if (!isTakeProfit && value >= now) {
+        return '$side must be less than the current P&L (${now.toStringAsFixed(2)}%).';
+      }
+    case TpSlMode.pnlUsd:
+      final now = currentPnlUsd;
+      if (now == null) return 'Current P&L \$ is not known yet.';
+      if (isTakeProfit && value <= now) {
+        return '$side must be more than the current P&L (${UtilString.usd(now)}).';
+      }
+      if (!isTakeProfit && value >= now) {
+        return '$side must be less than the current P&L (${UtilString.usd(now)}).';
+      }
+    case TpSlMode.price:
+      final now = currentPrice;
+      if (now == null) return 'Current price is not known yet.';
+      if (value <= 0) return '$side price must be above 0.';
+      final above = isTakeProfit == long;
+      if (above && value <= now) {
+        return '$side must be above the current price (${UtilString.price(now)}).';
+      }
+      if (!above && value >= now) {
+        return '$side must be below the current price (${UtilString.price(now)}).';
+      }
+  }
+  return null;
+}
+
 class _TpSlSheet extends ConsumerStatefulWidget {
-  const _TpSlSheet({required this.bot, required this.isTakeProfit});
+  const _TpSlSheet({required this.bot});
 
   final GridBot bot;
-  final bool isTakeProfit;
 
   @override
   ConsumerState<_TpSlSheet> createState() => _TpSlSheetState();
 }
 
 class _TpSlSheetState extends ConsumerState<_TpSlSheet> {
-  _TpSlInputMode _mode = _TpSlInputMode.pnlPercent;
-  final _valueController = TextEditingController();
-  bool _delayEnabled = false;
-  final _delayController = TextEditingController(text: '5');
+  TpSlMode _mode = TpSlMode.pnlPercent;
+  final _tp = TextEditingController();
+  final _sl = TextEditingController();
   bool _busy = false;
   String? _error;
 
   GridBot get bot => widget.bot;
-  bool get isTp => widget.isTakeProfit;
-
-  /// Current P/L, matching what [GridsTable]'s own P&L column already
-  /// shows - the same real basis Pionex's app itself displays this
-  /// screen's rules against.
-  double get _currentRatio => (bot.profitPercent ?? 0) / 100;
-  double get _currentAmount => bot.profitAmount ?? 0;
-
   bool get _long => bot.trend != GridDirection.short;
 
   @override
   void dispose() {
-    _valueController.dispose();
-    _delayController.dispose();
+    _tp.dispose();
+    _sl.dispose();
     super.dispose();
   }
 
-  /// Sign-convention validation per the user's own spec: TP is always a
-  /// plain positive magnitude in the "good" direction. SL must always sit
-  /// strictly further from breakeven than the bot's CURRENT P/L - positive
-  /// (but less than current) while in profit, negative (but more negative
-  /// than current) once in loss. Price mode instead compares against the
-  /// bot's own direction (long: TP above/SL below current price; short:
-  /// reversed) - the user's own wording ("TP more than current, SL less
-  /// than current") matches exactly for the long bot they were looking at;
-  /// generalized here for short too.
-  String? _validate(double value) {
-    switch (_mode) {
-      case _TpSlInputMode.price:
-        final top = bot.top, bottom = bot.bottom, price = bot.currentPrice;
-        if (top != null && bottom != null && (value > top || value < bottom)) {
-          return 'Must be within the grid range (${UtilString.price(bottom)}–${UtilString.price(top)}).';
-        }
-        if (price != null) {
-          final wantsAbove = isTp ? _long : !_long;
-          if (wantsAbove && value <= price) {
-            return 'Must be above the current price (${UtilString.price(price)}).';
-          }
-          if (!wantsAbove && value >= price) {
-            return 'Must be below the current price (${UtilString.price(price)}).';
-          }
-        }
-        return null;
-      case _TpSlInputMode.pnl:
-        if (isTp) {
-          if (value <= 0) return 'Take profit must be a positive amount.';
-          return null;
-        }
-        if (_currentAmount >= 0) {
-          if (value <= 0) {
-            return 'Bot is currently in profit (+${UtilString.usd(_currentAmount)}) - stop loss must be a positive amount less than that.';
-          }
-          if (value >= _currentAmount) {
-            return 'Must be less than the current profit (${UtilString.usd(_currentAmount)}).';
-          }
-        } else {
-          if (value >= 0) {
-            return 'Bot is currently at a loss (${UtilString.usd(_currentAmount)}) - stop loss must be a negative amount, further down than that.';
-          }
-          if (value <= _currentAmount) {
-            return 'Must be less negative loss than the current one (${UtilString.usd(_currentAmount)}) - i.e. a smaller magnitude.';
-          }
-        }
-        return null;
-      case _TpSlInputMode.pnlPercent:
-        if (isTp) {
-          if (value <= 0) return 'Take profit must be a positive percentage.';
-          return null;
-        }
-        if (_currentRatio >= 0) {
-          if (value <= 0) {
-            return 'Bot is currently in profit (+${(_currentRatio * 100).toStringAsFixed(2)}%) - stop loss must be positive and less than that.';
-          }
-          if (value >= _currentRatio) {
-            return 'Must be less than the current profit ratio (${(_currentRatio * 100).toStringAsFixed(2)}%).';
-          }
-        } else {
-          if (value >= 0) {
-            return 'Bot is currently at a loss (${(_currentRatio * 100).toStringAsFixed(2)}%) - stop loss must be negative.';
-          }
-          if (value <= _currentRatio) {
-            return 'Must be a smaller-magnitude loss than the current one (${(_currentRatio * 100).toStringAsFixed(2)}%).';
-          }
-        }
-        return null;
+  String get _unit => switch (_mode) {
+    TpSlMode.pnlPercent => '%',
+    TpSlMode.pnlUsd => 'USDT',
+    TpSlMode.price => 'USDT price',
+  };
+
+  String get _stopType => switch (_mode) {
+    TpSlMode.pnlPercent => 'profit_ratio',
+    TpSlMode.pnlUsd => 'profit_amount',
+    TpSlMode.price => 'price',
+  };
+
+  /// What Pionex receives: a ratio for %, the plain number otherwise.
+  String _wire(double v) =>
+      _mode == TpSlMode.pnlPercent ? '${v / 100}' : '$v';
+
+  Future<void> _submit() async {
+    final tpText = _tp.text.trim();
+    final slText = _sl.text.trim();
+    double? tp;
+    double? sl;
+    if (tpText.isNotEmpty) {
+      tp = double.tryParse(tpText);
+      if (tp == null) return setState(() => _error = 'TP is not a number.');
     }
-  }
-
-  Map<String, String?> _fields(double value) {
-    final type = switch (_mode) {
-      _TpSlInputMode.price => 'price',
-      _TpSlInputMode.pnl => 'profit_amount',
-      _TpSlInputMode.pnlPercent => 'profit_ratio',
-    };
-    final raw = switch (_mode) {
-      _TpSlInputMode.price => value.toString(),
-      _TpSlInputMode.pnl => value.toString(),
-      _TpSlInputMode.pnlPercent => (value / 100).toString(),
-    };
-    return {'type': type, 'raw': raw};
-  }
-
-  Future<void> _submit({required bool enable}) async {
-    final repo = ref.read(controlRepositoryProvider);
+    if (slText.isNotEmpty) {
+      sl = double.tryParse(slText);
+      if (sl == null) return setState(() => _error = 'SL is not a number.');
+    }
+    for (final (value, isTp) in [(tp, true), (sl, false)]) {
+      if (value == null) continue;
+      final error = validateTpSl(
+        mode: _mode,
+        isTakeProfit: isTp,
+        value: value,
+        long: _long,
+        currentPnlPercent: bot.profitPercent,
+        currentPnlUsd: bot.profitAmount,
+        currentPrice: bot.currentPrice,
+      );
+      if (error != null) return setState(() => _error = error);
+    }
+    final summary = (tp == null && sl == null)
+        ? 'Clear TP and SL on ${bot.pairKey}. SLL takes this trade back.'
+        : '${bot.pairKey}\n'
+              'TP: ${tp == null ? 'blank' : '$tp $_unit'}\n'
+              'SL: ${sl == null ? 'blank' : '$sl $_unit'}\n\n'
+              'SLL will be off for this trade.';
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Set TP / SL'),
+        content: Text(summary),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Confirm'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
     setState(() {
       _busy = true;
       _error = null;
     });
     try {
-      String? type;
-      String? raw;
-      if (enable) {
-        final parsed = double.tryParse(_valueController.text.trim());
-        if (parsed == null) {
-          setState(() {
-            _error = 'Enter a value.';
-            _busy = false;
-          });
-          return;
-        }
-        final validation = _validate(parsed);
-        if (validation != null) {
-          setState(() {
-            _error = validation;
-            _busy = false;
-          });
-          return;
-        }
-        final f = _fields(parsed);
-        type = f['type'];
-        raw = f['raw'];
-      }
-      final delaySec = _delayEnabled
-          ? int.tryParse(_delayController.text.trim())
-          : null;
-      final check = await (isTp
-          ? repo.checkAdjustTpSl(
-              bot: bot,
-              profitStopType: enable ? type : null,
-              profitStop: enable ? raw : null,
-              stopProfitEnabled: enable,
-            )
-          : repo.checkAdjustTpSl(
-              bot: bot,
-              lossStopType: enable ? type : null,
-              lossStop: enable ? raw : null,
-              stopLossEnabled: enable,
-            ));
-      if (check['checkResult'] != true) {
-        setState(() {
-          _error = 'Pionex refused this: ${check['reason'] ?? 'unknown reason'}';
-          _busy = false;
-        });
-        return;
-      }
-      if (!mounted) return;
-      final confirmed = await showDialog<bool>(
-        context: context,
-        builder: (context) => AlertDialog(
-          title: Text(enable ? 'Confirm ${isTp ? 'Take Profit' : 'Stop Loss'}' : 'Cancel ${isTp ? 'Take Profit' : 'Stop Loss'}'),
-          content: Text(
-            enable
-                ? '${bot.pairKey}: set ${isTp ? 'take profit' : 'stop loss'} to $raw ($type)${delaySec != null ? ', $delaySec s delay' : ''}?'
-                : '${bot.pairKey}: turn off the current ${isTp ? 'take profit' : 'stop loss'} setting?',
-          ),
-          actions: [
-            TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('Cancel')),
-            FilledButton(onPressed: () => Navigator.of(context).pop(true), child: const Text('Confirm')),
-          ],
-        ),
-      );
-      if (confirmed != true) {
-        setState(() => _busy = false);
-        return;
-      }
-      await (isTp
-          ? repo.adjustTpSl(
-              bot: bot,
-              profitStopType: enable ? type : null,
-              profitStop: enable ? raw : null,
-              stopProfitEnabled: enable,
-            )
-          : repo.adjustTpSl(
-              bot: bot,
-              lossStopType: enable ? type : null,
-              lossStop: enable ? raw : null,
-              stopLossEnabled: enable,
-            ));
+      await ref
+          .read(controlRepositoryProvider)
+          .setManualTpSl(
+            bot: bot,
+            stopType: _stopType,
+            takeProfit: tp == null ? null : _wire(tp),
+            stopLoss: sl == null ? null : _wire(sl),
+          );
       if (!mounted) return;
       Navigator.of(context).pop();
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('${isTp ? 'Take profit' : 'Stop loss'} updated for ${bot.pairKey}.')),
+        SnackBar(
+          content: Text(
+            (tp == null && sl == null)
+                ? 'TP/SL cleared for ${bot.pairKey} - SLL is back on.'
+                : 'TP/SL set for ${bot.pairKey} - SLL is off for this trade.',
+          ),
+        ),
       );
     } catch (e) {
       setState(() {
-        _error = 'Failed: $e';
+        _error = 'Pionex refused it: $e';
         _busy = false;
       });
     }
@@ -252,159 +197,126 @@ class _TpSlSheetState extends ConsumerState<_TpSlSheet> {
 
   @override
   Widget build(BuildContext context) {
-    final title = isTp ? 'Take Profit' : 'Stop Loss';
-    final currentlyEnabled = isTp ? bot.stopProfitEnabled : bot.stopLossEnabled;
+    final theme = Theme.of(context);
+    final pct = bot.profitPercent;
+    final usd = bot.profitAmount;
+    final now = switch (_mode) {
+      TpSlMode.pnlPercent =>
+        pct == null ? '—' : '${pct.toStringAsFixed(2)}%',
+      TpSlMode.pnlUsd => usd == null ? '—' : UtilString.usd(usd),
+      TpSlMode.price =>
+        bot.currentPrice == null ? '—' : UtilString.price(bot.currentPrice!),
+    };
+    final (tpHint, slHint) = switch (_mode) {
+      TpSlMode.pnlPercent => ('more than $now', 'less than $now'),
+      TpSlMode.pnlUsd => ('more than $now', 'less than $now'),
+      TpSlMode.price =>
+        _long
+            ? ('above $now', 'below $now')
+            : ('below $now', 'above $now'),
+    };
     return SafeArea(
       child: Container(
-        constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.88),
         decoration: BoxDecoration(
-          color: Theme.of(context).colorScheme.surface,
+          color: theme.colorScheme.surface,
           borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
         ),
         padding: EdgeInsets.only(
           left: CoreSpacing.lg,
           right: CoreSpacing.lg,
-          top: CoreSpacing.sm,
+          top: CoreSpacing.md,
           bottom: MediaQuery.of(context).viewInsets.bottom + CoreSpacing.lg,
         ),
         child: SingleChildScrollView(
           child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Center(
-              child: Container(
-                width: 36,
-                height: 4,
-                margin: const EdgeInsets.only(bottom: CoreSpacing.md),
-                decoration: BoxDecoration(
-                  color: Theme.of(context).dividerColor,
-                  borderRadius: BorderRadius.circular(2),
-                ),
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                'TP / SL  ${bot.pairKey} ${_long ? 'LONG' : 'SHORT'}',
+                style: theme.textTheme.titleMedium,
+                textAlign: TextAlign.center,
               ),
-            ),
-            Text('$title ${bot.tickerSymbol}', style: Theme.of(context).textTheme.headlineSmall, textAlign: TextAlign.center),
-            const SizedBox(height: CoreSpacing.md),
-            SegmentedButton<_TpSlInputMode>(
-              segments: const [
-                ButtonSegment(value: _TpSlInputMode.price, label: Text('Price')),
-                ButtonSegment(value: _TpSlInputMode.pnl, label: Text('PnL')),
-                ButtonSegment(value: _TpSlInputMode.pnlPercent, label: Text('PnL%')),
-              ],
-              selected: {_mode},
-              onSelectionChanged: (s) => setState(() {
-                _mode = s.first;
-                _error = null;
-              }),
-            ),
-            const SizedBox(height: CoreSpacing.md),
-            TextField(
-              controller: _valueController,
-              keyboardType: const TextInputType.numberWithOptions(signed: true, decimal: true),
-              decoration: InputDecoration(
-                labelText: switch (_mode) {
-                  _TpSlInputMode.price => '$title Trigger Price (USDT)',
-                  _TpSlInputMode.pnl => 'Profit/loss trigger value (USDT)',
-                  _TpSlInputMode.pnlPercent => 'Profit/loss ratio trigger (%)',
-                },
-                border: const OutlineInputBorder(),
-              ),
-              onChanged: (_) => setState(() => _error = null),
-            ),
-            const SizedBox(height: CoreSpacing.sm),
-            Text(
-              'Tip: the profit/loss trigger does not deduct the closing fee - the actual result will be slightly '
-              '${isTp ? 'lower' : 'higher'} than this setting.',
-              style: Theme.of(context).textTheme.bodySmall,
-            ),
-            const SizedBox(height: CoreSpacing.md),
-            Row(
-              children: [
-                Expanded(child: Text('$title delay', style: Theme.of(context).textTheme.bodyMedium)),
-                Switch(
-                  value: _delayEnabled,
-                  onChanged: (v) => setState(() => _delayEnabled = v),
-                ),
-              ],
-            ),
-            if (_delayEnabled)
-              TextField(
-                controller: _delayController,
-                keyboardType: TextInputType.number,
-                decoration: const InputDecoration(
-                  labelText: 'Delay time (sec, 5-30)',
-                  border: OutlineInputBorder(),
-                ),
-              ),
-            const SizedBox(height: CoreSpacing.md),
-            _InfoRow(label: 'Last Price', value: bot.currentPrice == null ? '—' : UtilString.price(bot.currentPrice!)),
-            _InfoRow(
-              label: 'Price range',
-              value: (bot.bottom == null || bot.top == null) ? '—' : '${UtilString.price(bot.bottom!)}-${UtilString.price(bot.top!)}',
-            ),
-            _InfoRow(
-              label: 'Est. Liq. Price',
-              value: (bot.liquidationPrice == null || bot.liquidationPrice == 0) ? '—' : UtilString.price(bot.liquidationPrice!),
-            ),
-            _InfoRow(label: 'Break-even Price', value: bot.entryPrice == null ? '—' : UtilString.price(bot.entryPrice!)),
-            if (_error != null) ...[
-              const SizedBox(height: CoreSpacing.sm),
-              Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
-            ],
-            if (currentlyEnabled) ...[
               const SizedBox(height: CoreSpacing.md),
-              Align(
-                alignment: Alignment.centerRight,
-                child: TextButton(
-                  onPressed: _busy ? null : () => _submit(enable: false),
-                  child: const Text('Cancel current settings'),
+              SegmentedButton<TpSlMode>(
+                segments: const [
+                  ButtonSegment(value: TpSlMode.pnlPercent, label: Text('P&L %')),
+                  ButtonSegment(value: TpSlMode.pnlUsd, label: Text('P&L \$')),
+                  ButtonSegment(value: TpSlMode.price, label: Text('Price')),
+                ],
+                selected: {_mode},
+                onSelectionChanged: (s) => setState(() {
+                  _mode = s.first;
+                  _error = null;
+                }),
+              ),
+              const SizedBox(height: CoreSpacing.sm),
+              Text(
+                'Now: $now',
+                style: theme.textTheme.bodyMedium,
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: CoreSpacing.md),
+              TextField(
+                controller: _tp,
+                keyboardType: const TextInputType.numberWithOptions(
+                  signed: true,
+                  decimal: true,
                 ),
+                decoration: InputDecoration(
+                  labelText: 'Take profit ($_unit)',
+                  helperText: '$tpHint - leave blank for none',
+                  border: const OutlineInputBorder(),
+                ),
+                onChanged: (_) => setState(() => _error = null),
+              ),
+              const SizedBox(height: CoreSpacing.md),
+              TextField(
+                controller: _sl,
+                keyboardType: const TextInputType.numberWithOptions(
+                  signed: true,
+                  decimal: true,
+                ),
+                decoration: InputDecoration(
+                  labelText: 'Stop loss ($_unit)',
+                  helperText: '$slHint - leave blank for none',
+                  border: const OutlineInputBorder(),
+                ),
+                onChanged: (_) => setState(() => _error = null),
+              ),
+              const SizedBox(height: CoreSpacing.sm),
+              Text(
+                'Setting TP or SL turns SLL off for this trade. Leave both '
+                'blank to clear them and give the trade back to SLL.',
+                style: theme.textTheme.bodySmall,
+              ),
+              if (_error != null) ...[
+                const SizedBox(height: CoreSpacing.sm),
+                Text(_error!, style: TextStyle(color: theme.colorScheme.error)),
+              ],
+              const SizedBox(height: CoreSpacing.md),
+              Row(
+                children: [
+                  Expanded(
+                    child: ReuseButton(
+                      label: 'Cancel',
+                      tone: ReuseButtonTone.neutral,
+                      onPressed: _busy ? null : () => Navigator.of(context).pop(),
+                    ),
+                  ),
+                  const SizedBox(width: CoreSpacing.sm),
+                  Expanded(
+                    child: ReuseButton(
+                      label: 'Confirm',
+                      loading: _busy,
+                      onPressed: _busy ? null : _submit,
+                    ),
+                  ),
+                ],
               ),
             ],
-            const SizedBox(height: CoreSpacing.md),
-            Row(
-              children: [
-                Expanded(
-                  child: ReuseButton(
-                    label: 'Cancel',
-                    tone: ReuseButtonTone.neutral,
-                    onPressed: _busy ? null : () => Navigator.of(context).pop(),
-                  ),
-                ),
-                const SizedBox(width: CoreSpacing.sm),
-                Expanded(
-                  child: ReuseButton(
-                    label: 'Confirm',
-                    loading: _busy,
-                    onPressed: () => _submit(enable: true),
-                  ),
-                ),
-              ],
-            ),
-          ],
           ),
         ),
-      ),
-    );
-  }
-}
-
-class _InfoRow extends StatelessWidget {
-  const _InfoRow({required this.label, required this.value});
-
-  final String label;
-  final String value;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 2),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          Text(label, style: Theme.of(context).textTheme.bodyMedium),
-          Text(value, style: Theme.of(context).textTheme.bodyMedium),
-        ],
       ),
     );
   }

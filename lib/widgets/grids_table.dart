@@ -10,6 +10,7 @@ import '../utilities/util_string.dart';
 import 'bot_actions_menu.dart';
 import 'bot_add_investment_sheet.dart';
 import 'bot_margin_sheet.dart';
+import 'bot_tp_sl_sheet.dart';
 import 'reuse_button.dart';
 import 'reuse_chip.dart';
 import 'reuse_data_table.dart';
@@ -51,10 +52,14 @@ class GridsTable extends StatefulWidget {
     this.asCards = false,
     this.cardSort,
     this.favoriteIds = const {},
+    this.manualTpSlIds = const {},
   });
 
   /// Bots opened as favorite trades - a star on their card.
   final Set<String> favoriteIds;
+
+  /// Bots whose TP/SL the user set by hand (SLL off) - shown as a badge.
+  final Set<String> manualTpSlIds;
 
   /// tradingMT5-style running cards instead of the table (Auto bots).
   final bool asCards;
@@ -918,6 +923,15 @@ class _GridsTableState extends State<GridsTable> {
                         Colors.deepOrange.withValues(alpha: 0.15),
                         Colors.deepOrange,
                       ),
+                    if (widget.manualTpSlIds.contains(g.buOrderId))
+                      Tooltip(
+                        message: 'TP/SL set by hand - SLL is off for this trade.',
+                        child: badge(
+                          'MANUAL TP/SL',
+                          scheme.primary.withValues(alpha: 0.15),
+                          scheme.primary,
+                        ),
+                      ),
                   ],
                 ),
               ),
@@ -1092,6 +1106,8 @@ class _GridsTableState extends State<GridsTable> {
             showAdjustMarginSheet(context, bot: g);
           case 'invest':
             showAddInvestmentSheet(context, bot: g);
+          case 'tpsl':
+            showTpSlSheet(context, bot: g);
           case 'manual':
             widget.onBulkConvertToManual?.call([g]);
           case 'auto':
@@ -1170,9 +1186,32 @@ class _GridsTableState extends State<GridsTable> {
               ],
             ),
           ),
+          const PopupMenuItem(
+            value: 'tpsl',
+            child: Row(
+              children: [
+                Icon(Icons.track_changes, size: 20),
+                SizedBox(width: 10),
+                Text('TP / SL'),
+              ],
+            ),
+          ),
+          if (widget.onBulkConvertToAuto != null)
+            PopupMenuItem(
+              value: 'auto',
+              enabled: !widget.busy,
+              child: const Row(
+                children: [
+                  Icon(Icons.smart_toy_outlined, size: 20),
+                  SizedBox(width: 10),
+                  Text('Convert to auto'),
+                ],
+              ),
+            ),
           if (widget.onBulkConvertToManual != null)
-            const PopupMenuItem(
+            PopupMenuItem(
               value: 'manual',
+              enabled: !widget.busy,
               child: Row(
                 children: [
                   Icon(Icons.person_outline, size: 20),

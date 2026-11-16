@@ -113,6 +113,11 @@ class CoreStorage {
   String get stopLossLockStateFile =>
       p.join(logsDir, 'stop-loss-lock-state.json');
 
+  /// buOrderIds whose TP/SL the user set by hand from the More menu
+  /// (2026-11-16, per the user): SLL is off for those bots. Written only by
+  /// the GUI, read by the engine every SLL pass.
+  String get manualTpSlFile => p.join(logsDir, 'manual-tp-sl.json');
+
   /// Per-buOrderId entry-signal record (see `EntrySignalStore`) - which of
   /// the user's 60 (signal, zone) entries opened this bot, and, once known,
   /// which one closed it. Keyed by buOrderId; a fresh recycle gets its own
