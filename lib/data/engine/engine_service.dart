@@ -1382,10 +1382,14 @@ class EngineService {
             _nextInvestmentByPair['${_gridKey(bot.base)}|${category.wireValue}'] =
                 recycled;
             _persistPendingInvestment(bot.base, category, recycled);
+            // INFO, not ERROR (per the user, 2026-11-17): the logger reads
+            // "downtime" as "DOWN".
             logger.log(
-              'RECYCLE $buOrderId: closed during downtime, found by startup '
-              'reconciliation, with P/L=${bot.totalRealizedProfit} USDT '
-              '(base investment=$baseInvestment) - next investment=$recycled',
+              'RECYCLE $buOrderId: closed while the engine was off, found by '
+              'startup reconciliation - '
+              '${returned != null ? 'Pionex returned $returned USDT' : 'P/L=${bot.totalRealizedProfit} USDT on base investment=$baseInvestment'} '
+              '- next investment=$recycled',
+              level: 'INFO',
             );
           }
         }
