@@ -770,9 +770,12 @@ class PionexClient {
     String? base,
     String? quote,
     String? buOrderTypes,
+    bool Function(List<Map<String, dynamic>> page)? stopWhen,
+    int? maxPages,
   }) async {
     final all = <Map<String, dynamic>>[];
     String? pageToken;
+    var pages = 0;
     while (true) {
       final params = {
         'status': status,
@@ -809,7 +812,11 @@ class PionexClient {
           'Pionex bot/orders "results" was ${results.runtimeType}, not a list.',
         );
       }
-      all.addAll(results.cast<Map<String, dynamic>>());
+      final page = results.cast<Map<String, dynamic>>();
+      all.addAll(page);
+      pages++;
+      if (stopWhen != null && stopWhen(page)) break;
+      if (maxPages != null && pages >= maxPages) break;
       pageToken = data['nextPageToken'] as String?;
       if (pageToken == null || pageToken.isEmpty) break;
     }
@@ -850,20 +857,29 @@ class PionexClient {
         'getBotOrderByBuOrderId REFUSED: no buOrderId provided',
       );
     }
-    final pool = <Map<String, dynamic>>[];
+    bool matches(Map<String, dynamic> o) {
+      final data =
+          (o['buOrderData'] as Map?)?.cast<String, dynamic>() ?? const {};
+      return o['buOrderId']?.toString() == buOrderId ||
+          data['buOrderId']?.toString() == buOrderId;
+    }
+
+    // Stops at the page that holds the bot (2026-11-17): this used to page
+    // through the WHOLE finished history on every call - live, ~1,100
+    // requests in 3 minutes for one manual stop, which stalled the engine's
+    // refresh before it could record SHIB's close or recycle its money.
+    // Finished bots come newest first, so a just-closed one is on page 1;
+    // the cap keeps a missing id from ever scanning everything.
     for (final status in ['running', 'finished']) {
       final orders = await listBotOrders(
         status: status,
         buOrderTypes: 'futures_grid',
+        stopWhen: (page) => page.any(matches),
+        maxPages: status == 'finished' ? 5 : null,
       );
-      pool.addAll(orders);
-    }
-    for (final o in pool) {
-      final data =
-          (o['buOrderData'] as Map?)?.cast<String, dynamic>() ?? const {};
-      if (o['buOrderId']?.toString() == buOrderId ||
-          data['buOrderId']?.toString() == buOrderId)
-        return o;
+      for (final o in orders) {
+        if (matches(o)) return o;
+      }
     }
     return null;
   }
@@ -931,6 +947,46 @@ class PionexClient {
       if (DateTime.now().isAfter(deadline)) {
         return current ?? previous;
       }
+      previous = current ?? previous;
+      await Future<void>.delayed(pollEvery);
+    }
+  }
+
+  /// What Pionex actually gave back to the free balance when [buOrderId]
+  /// closed (2026-11-17, per the user): `unlockQuoteAmount`. It already
+  /// counts P/L, fees and any margin the user took out by hand on Pionex -
+  /// Pionex's own `usdtInvestment`/`extraMargin` never change after a
+  /// manual reduction (live: SHIB still read 20 / 19.42 at close, but
+  /// returned 17.10, matching the free balance to the cent). Null while the
+  /// bot still runs or when the field is missing. Polls until two reads
+  /// agree, like [getSettledGridPnl].
+  Future<double?> getSettledReturnedAmount(
+    String buOrderId, {
+    Duration budget = const Duration(seconds: 25),
+    Duration pollEvery = const Duration(seconds: 5),
+  }) async {
+    double? read(Map<String, dynamic>? rec) {
+      if (rec == null) return null;
+      final o = (rec['buOrderData'] as Map?)?.cast<String, dynamic>() ?? rec;
+      final status = '${o['status'] ?? rec['status']}'.toLowerCase();
+      if (status == 'running' || status == 'null') return null;
+      final v = _num(o['unlockQuoteAmount']) ?? _num(o['quoteAmountBeforeSell']);
+      return (v == null || v < 0) ? null : v;
+    }
+
+    double? previous;
+    final deadline = DateTime.now().add(budget);
+    while (true) {
+      double? current;
+      try {
+        current = read(await getBotOrderByBuOrderId(buOrderId));
+      } catch (_) {}
+      if (current != null &&
+          previous != null &&
+          (current - previous).abs() < 0.0000001) {
+        return current;
+      }
+      if (DateTime.now().isAfter(deadline)) return current ?? previous;
       previous = current ?? previous;
       await Future<void>.delayed(pollEvery);
     }

@@ -1371,11 +1371,13 @@ class EngineService {
               bot.initialInvestment ??
               ((bot.actualInvestment ?? 0) + (bot.extraMargin ?? 0));
           if (baseInvestment > 0) {
+            final returned = await _returnedOnClose(buOrderId);
             final recycled = _roundTo2dp(
-              (baseInvestment + bot.totalRealizedProfit!).clamp(
-                0,
-                double.infinity,
-              ),
+              returned ??
+                  (baseInvestment + bot.totalRealizedProfit!).clamp(
+                    0,
+                    double.infinity,
+                  ),
             );
             _nextInvestmentByPair['${_gridKey(bot.base)}|${category.wireValue}'] =
                 recycled;
@@ -6146,6 +6148,19 @@ class EngineService {
   Future<double?> _getSettledGridPnl(String buOrderId) =>
       pionex.getSettledGridPnl(buOrderId);
 
+  /// The money Pionex actually returned when [buOrderId] closed (see
+  /// [PionexClient.getSettledReturnedAmount]) - the next investment on
+  /// every recycle path (2026-11-17, per the user: a manual margin
+  /// reduction on Pionex must carry into the next trade). Null = unknown,
+  /// and the caller falls back to its old investment + P/L.
+  Future<double?> _returnedOnClose(String buOrderId) async {
+    try {
+      return await pionex.getSettledReturnedAmount(buOrderId);
+    } catch (_) {
+      return null;
+    }
+  }
+
   Future<void> _refreshActiveGrids() async {
     if (!pionex.available) {
       logger.log('SKIP grid refresh: Pionex keys not configured (.env)');
@@ -6436,16 +6451,35 @@ class EngineService {
                   ? bot.actualInvestment! + bot.extraMargin!
                   : null;
               final baseInvestment = liveTotal ?? entry.investment;
+              // What Pionex actually returned wins (2026-11-17, per the
+              // user) - see [_returnedOnClose].
+              final returned = await _returnedOnClose(id);
               final recycled = _roundTo2dp(
-                (baseInvestment + freshPnl).clamp(0, double.infinity),
+                returned ??
+                    (baseInvestment + freshPnl).clamp(0, double.infinity),
               );
               _nextInvestmentByPair[entryKey] = recycled;
               _persistPendingInvestment(base, reconcileCategory, recycled);
               logger.log(
+                '${returned != null ? 'RECYCLE $id: Pionex returned $returned USDT - using that. ' : ''}'
                 'RECYCLE $id: closed via Pionex-side reconciliation with P/L=$freshPnl USDT '
                 '(base investment=$baseInvestment${liveTotal != null ? ' [live actual+margin]' : ' [original entry, no live snapshot]'}) '
                 '- next investment=$recycled',
               );
+            } else {
+              // No in-memory entry (e.g. the engine restarted before this
+              // close was recorded): Pionex's returned amount is still the
+              // truth for the next trade (2026-11-17, per the user).
+              final returned = await _returnedOnClose(id);
+              if (returned != null && returned > 0) {
+                final recycled = _roundTo2dp(returned);
+                _nextInvestmentByPair[entryKey] = recycled;
+                _persistPendingInvestment(base, reconcileCategory, recycled);
+                logger.log(
+                  'RECYCLE $id: closed via Pionex-side reconciliation, no app '
+                  'record of it - Pionex returned $returned USDT - next investment=$recycled',
+                );
+              }
             }
           }
           // Opposite-direction re-entry on a raw -50% baseline SL hit
@@ -6628,11 +6662,13 @@ class EngineService {
           // into the next bot's investment instead of silently falling
           // back to the flat default.
           if (!wasInterrupted && fallback != null && fallbackPnl != null) {
+            final returned = await _returnedOnClose(id);
             final recycled = _roundTo2dp(
-              (fallback.value.investment + fallbackPnl).clamp(
-                0,
-                double.infinity,
-              ),
+              returned ??
+                  (fallback.value.investment + fallbackPnl).clamp(
+                    0,
+                    double.infinity,
+                  ),
             );
             _nextInvestmentByPair[fallback.key] = recycled;
             _persistPendingInvestment(
@@ -7816,7 +7852,17 @@ class EngineService {
             }
             double? recycled;
             double? pnl;
-            try {
+            final returned = await _returnedOnClose(entryId);
+            if (returned != null) {
+              recycled = _roundTo2dp(returned);
+              _nextInvestmentByPair[entryKey] = recycled;
+              _persistPendingInvestment(base, category, recycled);
+              logger.log(
+                'RECYCLE $symbol: grid $entryId closed - Pionex returned '
+                '$returned USDT to the free balance (app record was '
+                '$oldInvestment + P/L) - next investment=$recycled',
+              );
+            } else try {
               // Settled-poll (see _getSettledGridPnl's doc) - confirmed
               // live (2026-09-19) this immediate read used to feed the
               // recycle math a pre-settlement figure that Pionex later
@@ -8497,13 +8543,17 @@ class EngineService {
         // refuse to open this pair this cycle rather than guess.
         var confirmedSplit = false;
         if (splitResponse != null) {
-          final actual = double.tryParse(
+          final firstActual = double.tryParse(
             '${splitResponse['estimateInvestment']}',
           );
           final reserve = double.tryParse(
             '${splitResponse['estimateExtraMargin']}',
           );
-          if (actual != null && actual > 0 && reserve != null && reserve >= 0) {
+          if (firstActual != null &&
+              firstActual > 0 &&
+              reserve != null &&
+              reserve >= 0) {
+            var actual = firstActual;
             var total = actual + reserve;
             double free = double.infinity;
             try {
@@ -8515,7 +8565,50 @@ class EngineService {
               );
             }
             var effReserve = reserve;
+            // Budget above the free balance (2026-11-17, per the user - SHIB
+            // opened with actual 8.46 + extra 8.64 after 19.99 met 17.10
+            // free): ask Pionex for the split of what is actually free, so
+            // actual and extra keep Pionex's own proportion. Only if that
+            // fails is the extra margin shaved as before.
+            var resplit = false;
             if (free.isFinite && total > free) {
+              final capped = (free * 100).floor() / 100;
+              try {
+                final again = await pionex.checkFuturesGrid(
+                  base: futuresBase,
+                  quote: 'USDT',
+                  buOrderData: {
+                    'top': range.top.toString(),
+                    'bottom': range.bottom.toString(),
+                    'row': row,
+                    'grid_type': 'arithmetic',
+                    'trend': direction.wireValue,
+                    'leverage': leverage,
+                    'quoteInvestment': capped.toString(),
+                    'extraMargin': true,
+                  },
+                );
+                lastCheckParamsAt = DateTime.now();
+                final a2 = double.tryParse('${again['estimateInvestment']}');
+                final r2 = double.tryParse('${again['estimateExtraMargin']}');
+                if (a2 != null && a2 > 0 && r2 != null && r2 >= 0 &&
+                    a2 + r2 <= free + 0.0001) {
+                  logger.log(
+                    'AUTO-RESERVE $symbol: budget total ${actual + reserve} > free $free - '
+                    're-split by Pionex for $capped: actual=$a2 reserve=$r2.',
+                  );
+                  actual = a2;
+                  effReserve = r2;
+                  total = a2 + r2;
+                  resplit = true;
+                }
+              } catch (e) {
+                logger.log(
+                  'AUTO-RESERVE $symbol: re-split for the free $capped failed ($e) - shaving the reserve instead.',
+                );
+              }
+            }
+            if (!resplit && free.isFinite && total > free) {
               effReserve = ((free - actual) * 10000).floor() / 10000;
               effReserve = effReserve < 0 ? 0 : effReserve;
               total = actual + effReserve;
