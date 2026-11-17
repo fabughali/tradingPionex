@@ -2756,6 +2756,8 @@ class EngineService {
         }
         final attemptStartedAt = DateTime.now();
         var keyRefused = false;
+        // Only this attempt's own skip reason may excuse a strike.
+        _lastCreateSkipReason = null;
         try {
           await _manageGridPair(
             GridPairConfig(
@@ -8428,6 +8430,21 @@ class EngineService {
           'TP/SL $symbol: ${direction.wireValue} UNSAFE - entry $entryPrice is within 60% of Pionex\'s real liquidation price '
           '${resolved.liquidationPrice ?? "?"} (span ${range.top - range.bottom}) - shifting range to [${lvl.gridBottom}..${lvl.gridTop}] (parallel shift, span unchanged)',
         );
+        // The shift can push the bottom to (almost) zero when the entry
+        // sits close to liquidation (2026-11-17, live: SHIB shifted to
+        // 0.000000004, which rounds to 0 at Pionex's 8 decimals - Pionex
+        // answered "bottom must greater than 0" and it counted as a failed
+        // open, heading for retirement). That is a "not now" for this
+        // pair, not a failure: skip with a reason so no strike is counted.
+        if ((lvl.gridBottom * 1e8).round() < 1) {
+          _lastCreateSkipReason =
+              'too close to liquidation - the safe range would need a bottom of 0';
+          logger.log(
+            'TP/SL $symbol: the shifted range bottom (${lvl.gridBottom}) rounds to 0 - '
+            'not opening now; it will try again on the next check (not a strike).',
+          );
+          return;
+        }
         range = range.copyWith(top: lvl.gridTop, bottom: lvl.gridBottom);
         // The widened edges are fresh floating-point arithmetic, not
         // necessarily still at the precision Pionex just accepted above -
@@ -8444,6 +8461,15 @@ class EngineService {
         if (rewidened == null) {
           logger.log(
             'PRECISION $symbol: widened range had no accepted top/bottom rounding from 8 down to 0 decimals - refusing to open.',
+          );
+          return;
+        }
+        if (rewidened.bottom <= 0) {
+          _lastCreateSkipReason =
+              'too close to liquidation - the safe range would need a bottom of 0';
+          logger.log(
+            'TP/SL $symbol: the shifted range bottom rounded to ${rewidened.bottom} - '
+            'not opening now; it will try again on the next check (not a strike).',
           );
           return;
         }
