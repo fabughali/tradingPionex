@@ -5551,6 +5551,7 @@ class EngineService {
           'CRITICAL: could not restore both custom scripts after ${reloadSw.elapsedMilliseconds}ms - SKIPPING all data reads this cycle',
           level: 'CRITICAL',
         );
+        if (await _reloadOwnTabForStuckScripts()) return true;
         _markTvUnhealthy();
         return false;
       }
@@ -5575,6 +5576,70 @@ class EngineService {
   /// forever while every read silently fails. Marking the client dead here
   /// forces a fresh connect (and therefore a fresh `waitForChartApiReady`
   /// check) next cycle, and flips the status the GUI actually shows.
+  DateTime? _lastStuckScriptsReloadAt;
+
+  /// The two custom indicators stuck half-loaded on this app's tab
+  /// (2026-11-17, per the user: 1.5 hours with no chart reads - placeholder
+  /// names "EMA & HLOTT & MSB/OB" / "Combined_Indicators" never finished
+  /// loading, and closing/reopening them never helped; reloading the tab
+  /// fixed it at once). Reloads this app's own tab only, under the shared
+  /// `reload_own_tab` lock, then restores the indicators once more. At most
+  /// once every 10 minutes. True if the indicators are back.
+  Future<bool> _reloadOwnTabForStuckScripts() async {
+    final last = _lastStuckScriptsReloadAt;
+    if (last != null &&
+        DateTime.now().difference(last) < const Duration(minutes: 10)) {
+      return false;
+    }
+    if (!tvSync.tryLock('reload_own_tab')) {
+      logger.log(
+        'TV SYNC: tradingMT5 holds the TradingView lock - not reloading this '
+        'app\'s tab for the stuck indicators now; trying again next cycle.',
+      );
+      return false;
+    }
+    _lastStuckScriptsReloadAt = DateTime.now();
+    CdpClient? client;
+    try {
+      client = await connectToChart(
+        config.cdp.host,
+        config.cdp.port,
+        layoutName: config.cdp.layoutName,
+        log: logger.log,
+      );
+      await reloadOwnTab(client);
+      final ready = await waitForChartApiReady(client);
+      logger.log(
+        'TRADINGVIEW WATCHDOG: indicators stuck - reloaded this app\'s own tab '
+        'only (chart ready: $ready). Restoring the indicators again.',
+        level: 'WARNING',
+      );
+    } catch (e) {
+      logger.log(
+        'TRADINGVIEW WATCHDOG: could not reload this app\'s own tab for the '
+        'stuck indicators: $e',
+        level: 'CRITICAL',
+      );
+      return false;
+    } finally {
+      client?.close();
+      tvSync.releaseLock();
+    }
+    try {
+      final again = await enforceCustomScripts(
+        config.cdp.host,
+        config.cdp.port,
+      );
+      if (again.finalMsb && again.finalRsi) {
+        logger.log('Custom scripts restored after reloading the tab.');
+        return true;
+      }
+    } catch (e) {
+      logger.log('Restoring the indicators after the tab reload failed: $e');
+    }
+    return false;
+  }
+
   void _markTvUnhealthy() {
     if (_prevTvHealthy) {
       logger.log(
