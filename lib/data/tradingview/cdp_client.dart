@@ -295,6 +295,10 @@ bool _openedChartTabThisProcess = false;
 /// restart its restored tabs were still loading, looked missing, and an extra
 /// tab got opened - 3 chart tabs).
 DateTime? _firstSawTradingViewAt;
+
+/// Last time a hung own tab was reloaded by elimination (see
+/// [_connectToOwnTab]).
+DateTime? _lastHungOwnTabReloadAt;
 const Duration _openTabGrace = Duration(seconds: 90);
 DateTime? _lastChartTabOpenFailAt;
 const Duration _chartTabRetryEvery = Duration(minutes: 2);
@@ -531,6 +535,45 @@ Future<CdpClient> _connectToOwnTab(
         client.close();
       }
     }
+    // A hung own tab (2026-11-18, live: after a reload this app's tab stopped
+    // answering JS for minutes while tradingMT5's tab answered normally, and
+    // the app could not prove the silent tab was its own, so it waited).
+    // By elimination: exactly one chart tab is silent and every other one
+    // answered with another app's tag -> the silent one is this app's. It
+    // cannot answer JS, but Page.reload is handled by the browser itself.
+    // Under the shared sync lock, at most once every 5 minutes.
+    final silent = [
+      for (var i = 0; i < tags.length; i++)
+        if (tags[i] == tabNoAnswer) i,
+    ];
+    final othersForeign = tags
+        .where((t) => t != tabNoAnswer)
+        .every((t) => t != null && t != owner);
+    final lastHung = _lastHungOwnTabReloadAt;
+    if (silent.length == 1 &&
+        othersForeign &&
+        (lastHung == null ||
+            DateTime.now().difference(lastHung) >= const Duration(minutes: 5)) &&
+        beforeOpenTab != null &&
+        beforeOpenTab()) {
+      _lastHungOwnTabReloadAt = DateTime.now();
+      try {
+        final c = await _openClient(targets[silent.single]);
+        try {
+          await reloadOwnTab(c, provenByElimination: true);
+        } finally {
+          c.close();
+        }
+        log?.call(
+          'TV TAB: own tab hung (did not answer) and every other chart tab '
+          'belongs to the other app - reloaded it.',
+        );
+      } catch (e) {
+        log?.call('TV TAB: could not reload the hung own tab: $e');
+      } finally {
+        afterOpenTab?.call();
+      }
+    }
     if (decision.error != null) throw CdpException(decision.error!);
     var chosen = decision.use;
     for (final i in decision.claimOrder) {
@@ -573,8 +616,15 @@ Future<bool> isOwnTab(CdpClient client, {String owner = pionexTabOwner}) async {
 /// Reloads this app's own tab, the first recovery step for a stuck chart -
 /// far less disruptive than restarting TradingView, which would also take
 /// down the other app's tab. [client] must come from [connectToChart].
-Future<void> reloadOwnTab(CdpClient client) async {
-  if (!await isOwnTab(client)) {
+///
+/// [provenByElimination]: the tab is hung (can't answer the tag read) but
+/// every other chart tab answered with another app's tag, so it can only be
+/// this app's - see the hung-tab rule in [_connectToOwnTab].
+Future<void> reloadOwnTab(
+  CdpClient client, {
+  bool provenByElimination = false,
+}) async {
+  if (!provenByElimination && !await isOwnTab(client)) {
     throw CdpException('refusing to reload a tab that is not this app\'s own');
   }
   await client.send('Page.reload').timeout(CoreConstants.cdpConnectTimeout);
