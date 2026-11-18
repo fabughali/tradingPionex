@@ -3,6 +3,40 @@ import '../models/liquidation_levels.dart';
 
 const stableLiquidationFraction = 0.60;
 
+/// Starting-position rule (2026-11-17, per the user - general, every pair and
+/// direction). A futures grid only takes its opening position from the
+/// INNER grid lines on the position side of the entry: above the entry for a
+/// long, below it for a short (confirmed live on 9 real bots: every long held
+/// a position; the one short, XRP 0.8923..1.699 with 3 rows opened at 0.9995
+/// inside its lowest cell, held position 0 - P&L stuck at 0 until price
+/// climbed 18%). With no inner line on that side the bot never trades.
+///
+/// Returns null when the range already has such a line (or has no inner
+/// lines at all, [rows] < 2). Otherwise returns the same-width range shifted
+/// so the entry sits 1.5 grid steps from the take-profit edge - the middle
+/// of the second cell, leaving exactly one inner line on the position side.
+({double top, double bottom})? startingPositionShift({
+  required double top,
+  required double bottom,
+  required double entry,
+  required int rows,
+  required GridDirection direction,
+}) {
+  final span = top - bottom;
+  if (!span.isFinite || span <= 0 || rows < 2) return null;
+  final step = span / rows;
+  if (direction == GridDirection.long) {
+    // Highest inner line: top - step. Needs to be above the entry.
+    if (top - step > entry) return null;
+    final newTop = entry + 1.5 * step;
+    return (top: newTop, bottom: newTop - span);
+  }
+  // Lowest inner line: bottom + step. Needs to be below the entry.
+  if (bottom + step < entry) return null;
+  final newBottom = entry - 1.5 * step;
+  return (top: newBottom + span, bottom: newBottom);
+}
+
 /// New 60/40 model (2026-09-14), per the user's explicit spec, replacing
 /// [computeLiquidationLevels] for the real-open decision path only (that
 /// function's other, preview-only call site is untouched - out of scope of

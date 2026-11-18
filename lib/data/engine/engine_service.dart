@@ -155,11 +155,6 @@ class EngineService {
   /// chart_state.dart's `customScripts`.
   bool _loggedCustomScriptSources = false;
 
-  /// Temporary, one-time diagnostic dump of one specific bot's raw data -
-  /// see the log call site in _refreshActiveGrids. Added 2026-09-16, per
-  /// the user pointing at buOrderId b1574697-... to illustrate "running
-  /// vs. working" - remove once that check is done.
-  bool _loggedSpecificOrderSample = false;
 
   /// True once [RiskGate]'s one-time symbol+category key migration has run
   /// - see the resync call site in `_refreshActiveGrids`.
@@ -1423,7 +1418,16 @@ class EngineService {
   /// Falls back to showing the raw `reasonBy` value verbatim for any
   /// reason not explicitly covered here, per the user's own "and all
   /// other possible reasons" - never silently generic again.
+  /// Bots the app itself closed because they could never trade (see
+  /// [_closeIfNoStartingPosition]) - their history says so instead of
+  /// "terminated by user".
+  final Set<String> _closedForNoPosition = {};
+
   String _reconciledCloseReason(String buOrderId, String? reasonBy) {
+    if (_closedForNoPosition.contains(buOrderId)) {
+      return 'Closed by the app: no starting position (position 0, P&L 0) - '
+          'reopening with a range that has one.';
+    }
     // Checked FIRST (2026-09-22, per the user - History filters need to
     // tell an SLL-caused close apart from the normal ratchet/baseline):
     // a Stop Loss Lock-tagged pair has its ratchet ladder disabled
@@ -1465,6 +1469,7 @@ class EngineService {
   /// can never disagree about what actually happened to a given bot -
   /// called right alongside it at every real-close call site.
   String? _stopReasonFor(String buOrderId, String? reasonBy) {
+    if (_closedForNoPosition.contains(buOrderId)) return 'no_position';
     final lockedSl = stopLossLockState.lockedUsd(buOrderId);
     final ratcheted = tpSlRatchet.highestThreshold(buOrderId) > 0;
     return switch (reasonBy) {
@@ -6239,23 +6244,6 @@ class EngineService {
     }
     try {
       final orders = await pionex.getActiveGrids();
-      // Temporary, one-time diagnostic (2026-09-16, per the user's "is the
-      // bot running vs actually working" question) - dumps the real raw
-      // Pionex data for one specific bot the user pointed at
-      // (b1574697-c6dc-4297-a50a-3bd0aeac5116) so position/totalVolume/
-      // gridProfit can be checked directly instead of guessed. Remove
-      // after that check is done.
-      if (!_loggedSpecificOrderSample) {
-        for (final o in orders) {
-          if (o['buOrderId'] == 'b1574697-c6dc-4297-a50a-3bd0aeac5116') {
-            _loggedSpecificOrderSample = true;
-            logger.log(
-              'SPECIFIC ORDER SAMPLE (one-time, per the user): ${jsonEncode(o)}',
-            );
-            break;
-          }
-        }
-      }
       // Diagnostic added 2026-09-10, one-time (per the user: "TP&SL are not
       // reflecting real values ... double check from where they are
       // reading"). GridBot.takeProfitPrice/stopLossPrice are COMPUTED from
@@ -6900,6 +6888,7 @@ class EngineService {
         if (bot.isManuallyInterrupted) continue;
         _ensureOnAutoList(bot);
         try {
+          if (await _closeIfNoStartingPosition(bot, raw)) continue;
           await _sllCheck(bot, manualTpSl: manualTpSl.contains(id));
         } catch (e) {
           logger.log(
@@ -6945,6 +6934,69 @@ class EngineService {
   /// so a stale read can never move the same money twice.
   final Map<String, ({double expectedActual, DateTime at})> _sllPendingTopUp =
       {};
+
+  /// A running Auto bot that can never trade (2026-11-17, per the user:
+  /// "if P&L = 0 ... terminate this trade and reopen it" - general, every
+  /// pair and direction): Pionex reports position 0, its P&L is 0, and its
+  /// grid has no inner line on the position side of the current price (see
+  /// [startingPositionShift]) - so nothing can fill until price crosses a
+  /// whole grid step. The app cancels it; the normal close bookkeeping
+  /// recycles what Pionex returned, and the pair reopens from Waiting with
+  /// a range that starts with a position. A Last-marked pair is left alone
+  /// (closing it would end it for good). True if it was closed.
+  Future<bool> _closeIfNoStartingPosition(
+    GridBot bot,
+    Map<String, dynamic> raw,
+  ) async {
+    final id = bot.buOrderId;
+    if (_closedForNoPosition.contains(id)) return true;
+    final d = (raw['buOrderData'] as Map?)?.cast<String, dynamic>() ?? raw;
+    final position = double.tryParse('${d['position']}');
+    final top = bot.top, bottom = bot.bottom, rows = bot.row;
+    final direction = bot.trend;
+    if (position == null || position != 0) return false;
+    if (top == null || bottom == null || rows == null || direction == null) {
+      return false;
+    }
+    final base = bot.base
+        .toUpperCase()
+        .replaceAll(RegExp(r'\.PERP$', caseSensitive: false), '');
+    final category = botCategories.categoryOf(id) ?? AutoCategory.oneHour;
+    if (retired.isRetiredBase(base, category)) return false;
+    final price = await pionex.getTickerPrice('${base}_USDT_PERP');
+    if (price == null) return false;
+    final pnl = bot.copyWith(currentPrice: price).profitAmount ?? 0;
+    if (pnl.abs() >= 0.005) return false;
+    if (startingPositionShift(
+          top: top,
+          bottom: bottom,
+          entry: price,
+          rows: rows,
+          direction: direction,
+        ) ==
+        null) {
+      return false;
+    }
+    _closedForNoPosition.add(id);
+    logger.log(
+      'NO POSITION ${bot.pairKey} ($id): position 0, P&L 0, and no inner grid '
+      'line on the ${direction.wireValue} side of price $price in '
+      '[$bottom..$top] ($rows rows) - it cannot trade. Closing it; the pair '
+      'reopens from Waiting with a range that starts with a position.',
+      level: 'WARNING',
+    );
+    try {
+      await pionex.cancelFuturesGrid(buOrderId: id);
+    } catch (e) {
+      _closedForNoPosition.remove(id);
+      logger.log(
+        'NO POSITION ${bot.pairKey} ($id): cancel failed ($e) - trying again next pass.',
+        level: 'ERROR',
+      );
+      return false;
+    }
+    return true;
+  }
 
   /// buOrderIds whose TP/SL the user set by hand (see
   /// [CoreStorage.manualTpSlFile]). Read fresh every pass - the GUI writes it.
@@ -8596,6 +8648,90 @@ class EngineService {
       logger.log(
         'GRID COUNT $symbol: probed via checkParams -> row=$row (investment=$investment)',
       );
+
+      // Starting-position rule (2026-11-17, per the user - general, every
+      // pair and direction; see [startingPositionShift]): a range with no
+      // inner grid line on the position side of the entry opens with no
+      // position and never trades. Shift it (same width) so it does, as
+      // long as the shifted range still passes the 60/40 liquidation rule;
+      // otherwise skip this check (not a strike) and try again later.
+      final startShift = startingPositionShift(
+        top: range.top,
+        bottom: range.bottom,
+        entry: trigger,
+        rows: row,
+        direction: direction,
+      );
+      if (startShift != null) {
+        void skipNoStart(String why) {
+          _lastCreateSkipReason =
+              'no range both starts with a position and is safe from liquidation';
+          logger.log(
+            'START POSITION $symbol: entry $trigger has no inner grid line on the '
+            '${direction.wireValue} side of [${range.bottom}..${range.top}] ($row rows) - $why; '
+            'not opening now, it will try again on the next check (not a strike).',
+          );
+        }
+
+        if ((startShift.bottom * 1e8).round() < 1) {
+          skipNoStart('the shifted bottom would be 0');
+          return;
+        }
+        final shifted = await _resolveQuotePrecision(
+          futuresBase: futuresBase,
+          top: startShift.top,
+          bottom: startShift.bottom,
+          direction: direction,
+          leverage: leverage,
+          investment: investment.toString(),
+        );
+        lastCheckParamsAt = DateTime.now();
+        if (shifted == null || shifted.bottom <= 0) {
+          skipNoStart('Pionex accepted no rounding of the shifted range');
+          return;
+        }
+        if (startingPositionShift(
+              top: shifted.top,
+              bottom: shifted.bottom,
+              entry: trigger,
+              rows: row,
+              direction: direction,
+            ) !=
+            null) {
+          skipNoStart('rounding moved the shifted range back');
+          return;
+        }
+        final liq = shifted.liquidationPrice;
+        final shiftedSpan = shifted.top - shifted.bottom;
+        if (liq != null &&
+            (trigger - liq).abs() < stableLiquidationFraction * shiftedSpan) {
+          skipNoStart(
+            'the shifted range [${shifted.bottom}..${shifted.top}] would put the '
+            'entry within 60% of liquidation ($liq)',
+          );
+          return;
+        }
+        logger.log(
+          'START POSITION $symbol: entry $trigger had no inner grid line on the '
+          '${direction.wireValue} side of [${range.bottom}..${range.top}] ($row rows) - '
+          'shifted the range to [${shifted.bottom}..${shifted.top}] (same width) so the '
+          'bot opens with a position.',
+        );
+        range = range.copyWith(top: shifted.top, bottom: shifted.bottom);
+        // The create retry's "natural range" fallback must not undo this.
+        naturalTop = range.top;
+        naturalBottom = range.bottom;
+        lvl = computeLiquidationShift(
+          top: range.top,
+          bottom: range.bottom,
+          entry: trigger,
+          liquidationPrice: liq,
+          direction: direction,
+        );
+        if (liq != null) liquidationPreview = liq;
+        // The split below must be probed for the new range.
+        probeResponse = null;
+      }
 
       if (autoReserve) {
         var splitResponse = probeResponse;
