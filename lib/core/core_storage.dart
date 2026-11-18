@@ -118,6 +118,12 @@ class CoreStorage {
   /// the GUI, read by the engine every SLL pass.
   String get manualTpSlFile => p.join(logsDir, 'manual-tp-sl.json');
 
+  /// buOrderIds opened with their normal range because no safe
+  /// starting-position range existed (2026-11-18) - the no-position
+  /// backstop leaves these alone. Engine-only writer.
+  String get openedWithoutStartFile =>
+      p.join(logsDir, 'opened-without-start-position.json');
+
   /// Per-buOrderId entry-signal record (see `EntrySignalStore`) - which of
   /// the user's 60 (signal, zone) entries opened this bot, and, once known,
   /// which one closed it. Keyed by buOrderId; a fresh recycle gets its own

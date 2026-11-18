@@ -201,31 +201,43 @@ class _WaitingCard extends StatelessWidget {
         children: [
           Row(
             children: [
-              Flexible(
-                child: Text(
-                  symbol,
-                  style: theme.textTheme.titleMedium?.copyWith(
-                    fontWeight: FontWeight.w600,
-                  ),
+              // Name + badge take all the space left of the icons (fixed
+              // 2026-11-18, per the user: a Flexible beside a Spacer split
+              // the gap in half, so the icons stopped short of the edge).
+              Expanded(
+                child: Row(
+                  children: [
+                    Flexible(
+                      child: Text(
+                        symbol,
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.textTheme.titleMedium?.copyWith(
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                    Container(
+                      margin: const EdgeInsets.only(left: 6),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 6,
+                        vertical: 1,
+                      ),
+                      decoration: BoxDecoration(
+                        color: scheme.tertiaryContainer,
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: Text(
+                        'WAITING',
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.bold,
+                          color: scheme.onTertiaryContainer,
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ),
-              Container(
-                margin: const EdgeInsets.only(left: 6),
-                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-                decoration: BoxDecoration(
-                  color: scheme.tertiaryContainer,
-                  borderRadius: BorderRadius.circular(4),
-                ),
-                child: Text(
-                  'WAITING',
-                  style: TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.bold,
-                    color: scheme.onTertiaryContainer,
-                  ),
-                ),
-              ),
-              const Spacer(),
               // Ignite and close sit flush at the card's right edge (per the
               // user, 2026-11-14) - compact icons, no button padding.
               if (onIgnite != null)

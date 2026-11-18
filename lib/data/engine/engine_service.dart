@@ -6944,12 +6944,44 @@ class EngineService {
   /// recycles what Pionex returned, and the pair reopens from Waiting with
   /// a range that starts with a position. A Last-marked pair is left alone
   /// (closing it would end it for good). True if it was closed.
+  /// Bots opened with their normal range because no safe starting-position
+  /// range existed - persisted so a restart keeps leaving them alone.
+  late final Set<String> _openedWithoutStart = () {
+    try {
+      return storage
+          .readJsonArrayStrict(storage.openedWithoutStartFile)
+          .map((e) => '$e')
+          .toSet();
+    } catch (_) {
+      return <String>{};
+    }
+  }();
+
+  void _markOpenedWithoutStart(String id) {
+    if (!_openedWithoutStart.add(id)) return;
+    // Keep only bots still running, so the file never grows.
+    _openedWithoutStart.removeWhere(
+      (b) => b != id && !_activeGridsById.containsKey(b),
+    );
+    try {
+      storage.writeJson(
+        storage.openedWithoutStartFile,
+        _openedWithoutStart.toList()..sort(),
+      );
+    } catch (e) {
+      logger.log('opened-without-start list: could not save ($e)', level: 'ERROR');
+    }
+  }
+
   Future<bool> _closeIfNoStartingPosition(
     GridBot bot,
     Map<String, dynamic> raw,
   ) async {
     final id = bot.buOrderId;
     if (_closedForNoPosition.contains(id)) return true;
+    // Opened this way on purpose (no safe starting-position range existed):
+    // closing it would only reopen the same range.
+    if (_openedWithoutStart.contains(id)) return false;
     final d = (raw['buOrderData'] as Map?)?.cast<String, dynamic>() ?? raw;
     final position = double.tryParse('${d['position']}');
     final top = bot.top, bottom = bot.bottom, rows = bot.row;
@@ -8342,6 +8374,9 @@ class EngineService {
     // and "free USDT before create").
     var lastCheckParamsAt = DateTime.now();
     double? lastKnownFreeUsdt;
+    // Set when no safe starting-position range existed and the bot opens
+    // with its normal range (see START POSITION below).
+    var openedWithoutStartPosition = false;
 
     if (isDryRun || existing != null) {
       // No live probing for a preview-only pass (see the 2026-09-11 note
@@ -8663,34 +8698,27 @@ class EngineService {
         direction: direction,
       );
       if (startShift != null) {
-        void skipNoStart(String why) {
-          _lastCreateSkipReason =
-              'no range both starts with a position and is safe from liquidation';
-          logger.log(
-            'START POSITION $symbol: entry $trigger has no inner grid line on the '
-            '${direction.wireValue} side of [${range.bottom}..${range.top}] ($row rows) - $why; '
-            'not opening now, it will try again on the next check (not a strike).',
-          );
-        }
-
-        if ((startShift.bottom * 1e8).round() < 1) {
-          skipNoStart('the shifted bottom would be 0');
-          return;
-        }
-        final shifted = await _resolveQuotePrecision(
-          futuresBase: futuresBase,
-          top: startShift.top,
-          bottom: startShift.bottom,
-          direction: direction,
-          leverage: leverage,
-          investment: investment.toString(),
-        );
+        // No safe shifted range -> open with the normal range anyway
+        // (2026-11-18, per the user: a sure signal must still open; the app
+        // decides). The bot may sit at P&L 0 until price reaches its first
+        // grid line, and the no-position backstop leaves it alone.
+        String? noShiftWhy;
+        final shifted = (startShift.bottom * 1e8).round() < 1
+            ? null
+            : await _resolveQuotePrecision(
+                futuresBase: futuresBase,
+                top: startShift.top,
+                bottom: startShift.bottom,
+                direction: direction,
+                leverage: leverage,
+                investment: investment.toString(),
+              );
         lastCheckParamsAt = DateTime.now();
-        if (shifted == null || shifted.bottom <= 0) {
-          skipNoStart('Pionex accepted no rounding of the shifted range');
-          return;
-        }
-        if (startingPositionShift(
+        if ((startShift.bottom * 1e8).round() < 1) {
+          noShiftWhy = 'the shifted bottom would be 0';
+        } else if (shifted == null || shifted.bottom <= 0) {
+          noShiftWhy = 'Pionex accepted no rounding of the shifted range';
+        } else if (startingPositionShift(
               top: shifted.top,
               bottom: shifted.bottom,
               entry: trigger,
@@ -8698,19 +8726,24 @@ class EngineService {
               direction: direction,
             ) !=
             null) {
-          skipNoStart('rounding moved the shifted range back');
-          return;
+          noShiftWhy = 'rounding moved the shifted range back';
+        } else if (shifted.liquidationPrice != null &&
+            (trigger - shifted.liquidationPrice!).abs() <
+                stableLiquidationFraction * (shifted.top - shifted.bottom)) {
+          noShiftWhy =
+              'the shifted range [${shifted.bottom}..${shifted.top}] would put the '
+              'entry within 60% of liquidation (${shifted.liquidationPrice})';
         }
-        final liq = shifted.liquidationPrice;
-        final shiftedSpan = shifted.top - shifted.bottom;
-        if (liq != null &&
-            (trigger - liq).abs() < stableLiquidationFraction * shiftedSpan) {
-          skipNoStart(
-            'the shifted range [${shifted.bottom}..${shifted.top}] would put the '
-            'entry within 60% of liquidation ($liq)',
+        if (noShiftWhy != null) {
+          openedWithoutStartPosition = true;
+          logger.log(
+            'START POSITION $symbol: entry $trigger has no inner grid line on the '
+            '${direction.wireValue} side of [${range.bottom}..${range.top}] ($row rows) - '
+            '$noShiftWhy; opening with this normal range anyway (it may show P&L 0 '
+            'until price reaches its first grid line).',
           );
-          return;
-        }
+        } else {
+        final liq = shifted!.liquidationPrice;
         logger.log(
           'START POSITION $symbol: entry $trigger had no inner grid line on the '
           '${direction.wireValue} side of [${range.bottom}..${range.top}] ($row rows) - '
@@ -8731,6 +8764,7 @@ class EngineService {
         if (liq != null) liquidationPreview = liq;
         // The split below must be probed for the new range.
         probeResponse = null;
+        }
       }
 
       if (autoReserve) {
@@ -9148,6 +9182,7 @@ class EngineService {
           buOrderId: newBuOrderId,
           openEventType: confirmedEvent.kind,
         );
+        if (openedWithoutStartPosition) _markOpenedWithoutStart(newBuOrderId);
         // Entry-signal record (2026-09-26, per the user: "the record should
         // be one out of those 60 entries") - `zone`/`value` stay
         // permanently null under Worm10 (a Worm10Event carries no
