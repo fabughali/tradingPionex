@@ -8835,17 +8835,24 @@ class EngineService {
                 }
               } catch (e) {
                 logger.log(
-                  'AUTO-RESERVE $symbol: re-split for the free $capped failed ($e) - shaving the reserve instead.',
+                  'AUTO-RESERVE $symbol: re-split for the free $capped failed ($e).',
                 );
               }
             }
+            // Pionex decides the split, never the app (2026-11-18, per the
+            // user: "why is the app taking a decision on behalf of
+            // Pionex?"). The old fallback kept Pionex's actual and shaved the
+            // extra margin itself; now, if Pionex can't split what is free,
+            // the pair waits for the next check (not a strike).
             if (!resplit && free.isFinite && total > free) {
-              effReserve = ((free - actual) * 10000).floor() / 10000;
-              effReserve = effReserve < 0 ? 0 : effReserve;
-              total = actual + effReserve;
+              _lastCreateSkipReason =
+                  'Pionex could not split the free balance (\$$free) for this grid';
               logger.log(
-                'AUTO-RESERVE $symbol: budget total ${actual + reserve} > free $free - clamping reserve to $effReserve',
+                'AUTO-RESERVE $symbol: budget total ${actual + reserve} > free $free and '
+                'Pionex gave no split for the free amount - not opening now; it will '
+                'try again on the next check (not a strike).',
               );
+              return;
             }
             // MANDATORY (2026-09-10, per the user, after a live GALAUSDT
             // open came back with extraMargin effectively $0 - Pionex HAD
