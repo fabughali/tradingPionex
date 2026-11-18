@@ -8309,7 +8309,9 @@ class EngineService {
       logger.log('SKIP $symbol: could not read max leverage from Pionex');
       return;
     }
-    final leverage = maxLev; // Always max, regardless of direction/market.
+    // Max by default; lowered only when the starting-position rule needs
+    // it to keep liquidation safe (see START POSITION below).
+    var leverage = maxLev;
 
     // Grid count and auto-reserve are BOTH just "ask Pionex what it will
     // actually do before creating" (same pattern) - per the user's original
@@ -8701,15 +8703,56 @@ class EngineService {
           skipNoStart('rounding moved the shifted range back');
           return;
         }
-        final liq = shifted.liquidationPrice;
+        var liq = shifted.liquidationPrice;
         final shiftedSpan = shifted.top - shifted.bottom;
-        if (liq != null &&
-            (trigger - liq).abs() < stableLiquidationFraction * shiftedSpan) {
-          skipNoStart(
-            'the shifted range [${shifted.bottom}..${shifted.top}] would put the '
-            'entry within 60% of liquidation ($liq)',
+        bool safeFromLiquidation(double? l) =>
+            l == null ||
+            (trigger - l).abs() >= stableLiquidationFraction * shiftedSpan;
+        if (!safeFromLiquidation(liq)) {
+          // Lower leverage pushes liquidation away (2026-11-18, per the user:
+          // "app is controlling everything" - general, every pair): retry
+          // the same range at half the leverage each time, down to 1x, and
+          // use the first one Pionex's own liquidation price passes the
+          // 60/40 rule with. None passes -> wait, as before.
+          final maxLeverage = leverage;
+          var tryLeverage = leverage;
+          var found = false;
+          while (!found) {
+            final next = (tryLeverage / 2).floorToDouble();
+            if (next < 1) break;
+            tryLeverage = next;
+            final atLeverage = await _resolveQuotePrecision(
+              futuresBase: futuresBase,
+              top: shifted.top,
+              bottom: shifted.bottom,
+              direction: direction,
+              leverage: tryLeverage,
+              investment: investment.toString(),
+            );
+            lastCheckParamsAt = DateTime.now();
+            if (atLeverage == null) continue;
+            if (atLeverage.top != shifted.top ||
+                atLeverage.bottom != shifted.bottom) {
+              continue;
+            }
+            if (safeFromLiquidation(atLeverage.liquidationPrice)) {
+              liq = atLeverage.liquidationPrice;
+              leverage = tryLeverage;
+              found = true;
+            }
+          }
+          if (!found) {
+            skipNoStart(
+              'the shifted range [${shifted.bottom}..${shifted.top}] puts the entry '
+              'within 60% of liquidation ($liq) at every leverage from ${maxLeverage}x down to 1x',
+            );
+            return;
+          }
+          logger.log(
+            'START POSITION $symbol: liquidation too close at ${maxLeverage}x - '
+            'using ${leverage}x, the highest leverage whose liquidation ($liq) '
+            'passes the 60/40 rule for [${shifted.bottom}..${shifted.top}].',
           );
-          return;
         }
         logger.log(
           'START POSITION $symbol: entry $trigger had no inner grid line on the '
